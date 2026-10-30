@@ -1,0 +1,20 @@
+{
+  "name": "student-journal",
+  "private": false,
+  "version": "1.0.0",
+  "description": "Электронный журнал: группы, расписание, посещаемость, оценки и зачёты",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "seed:demo": "node scripts/seed-demo.js",
+    "test": "node --test test/schedule/resolver.test.js test/schedule/parser.test.js test/schedule/migrate.test.js test/telegram-bot.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "11.10.0",
+    "nodemailer": "^6.9.16",
+    "xlsx": "^0.18.5"
+  }
+}

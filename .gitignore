@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Runtime data & uploads (never publish real journals)
+data/
+uploads/
+tmp/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# Local / remote ops with credentials — keep out of public tree
+scripts/deploy-remote.mjs
+scripts/run-remote-*.mjs
+scripts/reset-admin-remote.mjs
+scripts/seed-groups.js
+scripts/seed-all-courses.js
+scripts/setup-yuk-and-course4.js
+scripts/fix-*.mjs
+tmp-*.mjs
+tmp-*.cjs
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.code-workspace
+
+# Misc local notes with private context
+ИНСТРУКЦИЯ.md
