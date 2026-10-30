@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, pbkdf2Sync, timingSafeEqual } from 'node:crypto';
 import Database from 'better-sqlite3';
-import XLSX from 'xlsx';
+import { buildStyledXlsx } from './lib/excel-export.js';
 import {
   DEFAULT_SHEET_URLS,
   importFromUrls,
@@ -3343,9 +3343,17 @@ function exportStudentCard({ studentId }) {
   };
 }
 
-function buildStudentWorkbook(studentId) {
+async function buildStudentWorkbook(studentId) {
   const file = exportStudentCard({ studentId });
-  return rowsToXlsx(file.filename, file.sheets);
+  const settings = getSettings();
+  return rowsToXlsx(file.filename, file.sheets.map((sheet) => ({
+    ...sheet,
+    title: sheet.name,
+    subtitle: file.rows?.[4]?.[1] ? `Ученик · ${file.rows[4][1]}` : 'Карточка ученика',
+  })), {
+    institution: settings.institutionName,
+    subtitle: settings.institutionSubtitle || 'Карточка ученика',
+  });
 }
 
 function attendanceMatrixRows(bundle) {
@@ -3365,30 +3373,41 @@ function attendanceMatrixRows(bundle) {
   return [header, ...body];
 }
 
-function sheetFromAoa(name, rows) {
-  const sheet = XLSX.utils.aoa_to_sheet(rows);
-  const widths = [];
-  for (const row of rows.slice(0, 80)) {
-    row.forEach((cell, index) => {
-      const len = String(cell ?? '').length;
-      widths[index] = Math.min(42, Math.max(widths[index] || 10, len + 2));
-    });
+function exportScopeLabel({ groupId, subjectId } = {}) {
+  if (subjectId) {
+    const subject = db.prepare(`
+      SELECT s.name AS subjectName, g.name AS groupName
+      FROM subjects s JOIN groups g ON g.id = s.group_id WHERE s.id = ?
+    `).get(parseId(subjectId));
+    if (subject) return `${subject.groupName} · ${subject.subjectName}`;
   }
-  sheet['!cols'] = widths.map((width) => ({ wch: width }));
-  return { name: name.slice(0, 31), sheet };
+  if (groupId) {
+    const group = db.prepare('SELECT name FROM groups WHERE id = ?').get(parseId(groupId));
+    if (group?.name) return group.name;
+  }
+  return 'Все группы';
 }
 
-function buildWorkbook({ groupId, subjectId } = {}) {
+async function buildWorkbook({ groupId, subjectId } = {}) {
   const settings = getSettings();
   const bundle = attendanceBundle({ groupId, subjectId });
   const attendance = exportAttendance({ groupId, subjectId });
   const grades = exportGrades({ groupId, subjectId });
   const credits = exportCredits({ groupId, subjectId });
   const summary = exportSummary({ groupId, subjectId });
+  const scopeName = exportScopeLabel({ groupId, subjectId });
   const overview = [
-    ['Заведение', settings.institutionName],
-    ['Подзаголовок', settings.institutionSubtitle],
-    ['Дата выгрузки', new Date().toLocaleString('ru-RU')],
+    ...exportMetaRows(`Журнал · ${scopeName}`, [
+      ['Общая явка %', bundle.totals.rate == null ? '' : String(bundle.totals.rate).replace('.', ',')],
+      ['Учеников', bundle.students.length],
+      ['Занятий', bundle.lessons.length],
+      ['Был', bundle.totals.present],
+      ['Опоздал', bundle.totals.late],
+      ['Уваж.', bundle.totals.excused || 0],
+      ['Не был', bundle.totals.absent],
+      ['Не отмечен', bundle.totals.unmarked],
+    ]),
+    ['Показатель', 'Значение'],
     ['Общая явка %', bundle.totals.rate == null ? '' : String(bundle.totals.rate).replace('.', ',')],
     ['Учеников', bundle.students.length],
     ['Занятий', bundle.lessons.length],
@@ -3401,47 +3420,51 @@ function buildWorkbook({ groupId, subjectId } = {}) {
   const roster = exportRoster({ groupId });
   const subjects = exportSubjectsList({ groupId });
   const schedule = exportSchedule({ groupId });
-  const sheets = [
-    sheetFromAoa('Обзор', overview),
-    sheetFromAoa('Сводка', summary.rows || summary.csv.split('\r\n').map((line) => line.split(';'))),
-    sheetFromAoa('Ученики', [
-      ['Ученик', 'Группа', 'Занятий', 'Был', 'Опоздал', 'Уваж.', 'Не был', 'Пусто', '%', 'Уровень'],
-      ...bundle.students.map((row) => [
-        row.fullName, row.groupName, row.total, row.present, row.late, row.excused || 0, row.absent, row.unmarked,
-        row.rate == null ? '' : String(row.rate).replace('.', ','), levelRu(row.level),
-      ]),
+  const studentsSheet = [
+    ...exportMetaRows(`Явка по ученикам · ${scopeName}`),
+    ['Ученик', 'Группа', 'Занятий', 'Был', 'Опоздал', 'Уваж.', 'Не был', 'Пусто', '%', 'Уровень'],
+    ...bundle.students.map((row) => [
+      row.fullName, row.groupName, row.total, row.present, row.late, row.excused || 0, row.absent, row.unmarked,
+      row.rate == null ? '' : String(row.rate).replace('.', ','), levelRu(row.level),
     ]),
-    sheetFromAoa('Список', roster.rows || [['Нет данных']]),
-    sheetFromAoa('Матрица явки', attendanceMatrixRows(bundle)),
-    sheetFromAoa('Детализация', attendance.detailRows || [['Нет данных']]),
-    sheetFromAoa('Оценки', grades.rows || [['Нет данных']]),
-    sheetFromAoa('Зачёты', credits.rows || [['Нет данных']]),
-    sheetFromAoa('Предметы', subjects.rows || [['Нет данных']]),
-    sheetFromAoa('Расписание', schedule.rows || [['Нет данных']]),
   ];
-  const wb = XLSX.utils.book_new();
-  for (const item of sheets) XLSX.utils.book_append_sheet(wb, item.sheet, item.name);
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const matrixSheet = [
+    ...exportMetaRows(`Матрица явки · ${scopeName}`),
+    ...attendanceMatrixRows(bundle),
+  ];
   const stamp = new Date().toISOString().slice(0, 10);
   const scope = groupId ? `group-${groupId}` : (subjectId ? `subject-${subjectId}` : 'all');
-  return {
-    filename: `zhurnal-${scope}-${stamp}.xlsx`,
-    buffer,
-    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  };
+  return rowsToXlsx(`zhurnal-${exportFileSlug(scopeName, scope)}-${stamp}.xlsx`, [
+    { name: 'Обзор', rows: overview, title: 'Обзор журнала', subtitle: scopeName },
+    { name: 'Сводка', rows: summary.rows, title: 'Сводная посещаемость', subtitle: scopeName },
+    { name: 'Ученики', rows: studentsSheet, title: 'Явка по ученикам', subtitle: scopeName },
+    { name: 'Список', rows: roster.rows, title: 'Список учеников', subtitle: scopeName },
+    { name: 'Матрица явки', rows: matrixSheet, title: 'Матрица посещаемости', subtitle: scopeName },
+    { name: 'Детализация', rows: attendance.detailRows, title: 'Детализация явки', subtitle: scopeName },
+    { name: 'Оценки', rows: grades.rows, title: 'Оценки', subtitle: scopeName },
+    { name: 'Зачёты', rows: credits.rows, title: 'Зачёты и экзамены', subtitle: scopeName },
+    { name: 'Предметы', rows: subjects.rows, title: 'Предметы', subtitle: scopeName },
+    { name: 'Расписание', rows: schedule.rows, title: schedule.title || 'Расписание', subtitle: scopeName },
+  ], {
+    institution: settings.institutionName,
+    subtitle: settings.institutionSubtitle || scopeName,
+  });
 }
 
-function rowsToXlsx(filename, sheets) {
-  const wb = XLSX.utils.book_new();
-  for (const item of sheets) {
-    const built = sheetFromAoa(item.name, item.rows);
-    XLSX.utils.book_append_sheet(wb, built.sheet, built.name);
-  }
-  return {
+async function rowsToXlsx(filename, sheets, extras = {}) {
+  const settings = getSettings();
+  return buildStyledXlsx({
     filename,
-    buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }),
-    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  };
+    sheets: (sheets || []).map((item) => ({
+      name: item.name,
+      rows: item.rows || [['Нет данных']],
+      title: item.title || item.name,
+      subtitle: item.subtitle || extras.subtitle || '',
+      branded: item.branded !== false,
+    })),
+    institution: extras.institution || settings.institutionName || 'Электронный журнал',
+    subtitle: extras.subtitle || settings.institutionSubtitle || '',
+  });
 }
 
 function sendCsv(res, filename, csv) {
@@ -3897,7 +3920,13 @@ function deleteScheduleEntry(id) {
 
 function exportSchedule({ groupId } = {}) {
   const rows = listScheduleEntries({ groupId });
+  const groupLabel = groupId
+    ? (db.prepare('SELECT name FROM groups WHERE id = ?').get(parseId(groupId))?.name || `group-${groupId}`)
+    : 'Все группы';
   const table = [
+    ...exportMetaRows(groupId ? `Расписание · ${groupLabel}` : 'Расписание', [
+      ['Пар в выгрузке', rows.length],
+    ]),
     ['Группа', 'Код', 'Неделя', 'День', 'Пара', 'Начало', 'Конец', 'Предмет', 'Вид', 'Преподаватель', 'Аудитория'],
     ...rows.map((row) => [
       row.groupName || '',
@@ -3913,8 +3942,14 @@ function exportSchedule({ groupId } = {}) {
       row.room,
     ]),
   ];
-  const suffix = groupId ? `-group-${groupId}` : '';
-  return { filename: `raspisanie${suffix}.csv`, csv: toCsv(table), rows: table };
+  const stamp = new Date().toISOString().slice(0, 10);
+  const suffix = groupId ? `-${exportFileSlug(groupLabel, `group-${groupId}`)}` : '';
+  return {
+    filename: `raspisanie${suffix}-${stamp}.csv`,
+    csv: toCsv(table),
+    rows: table,
+    title: groupId ? `Расписание · ${groupLabel}` : 'Расписание',
+  };
 }
 
 function currentEntriesAsImportShape() {
@@ -5132,7 +5167,7 @@ async function handleApi(req, res, path) {
         sendCsv(res, file.csvFilename, file.csv);
         return;
       }
-      const book = buildStudentWorkbook(studentId);
+      const book = await buildStudentWorkbook(studentId);
       sendBinary(res, book.filename, book.buffer, book.contentType);
       return;
     }
@@ -5161,53 +5196,139 @@ async function handleApi(req, res, path) {
     }
 
     if (kind === 'workbook' || (format === 'xlsx' && kind === 'summary')) {
+      const scopeName = exportScopeLabel({ groupId, subjectId });
+      const stamp = new Date().toISOString().slice(0, 10);
       const book = kind === 'workbook'
-        ? buildWorkbook({ groupId, subjectId })
-        : rowsToXlsx('svodka.xlsx', [
-          { name: 'Сводка', rows: exportSummary({ groupId, subjectId }).rows },
-          { name: 'Матрица', rows: attendanceMatrixRows(attendanceBundle({ groupId, subjectId })) },
-          { name: 'Список', rows: exportRoster({ groupId }).rows },
-        ]);
+        ? await buildWorkbook({ groupId, subjectId })
+        : await rowsToXlsx(`svodka-${exportFileSlug(scopeName, 'all')}-${stamp}.xlsx`, [
+          {
+            name: 'Сводка',
+            title: 'Сводная посещаемость',
+            subtitle: scopeName,
+            rows: exportSummary({ groupId, subjectId }).rows,
+          },
+          {
+            name: 'Матрица',
+            title: 'Матрица явки',
+            subtitle: scopeName,
+            rows: [
+              ...exportMetaRows(`Матрица явки · ${scopeName}`),
+              ...attendanceMatrixRows(attendanceBundle({ groupId, subjectId })),
+            ],
+          },
+          {
+            name: 'Список',
+            title: 'Список учеников',
+            subtitle: scopeName,
+            rows: exportRoster({ groupId }).rows,
+          },
+        ], { subtitle: scopeName });
       sendBinary(res, book.filename, book.buffer, book.contentType);
       return;
     }
     if (format === 'xlsx') {
       const stamp = new Date().toISOString().slice(0, 10);
+      const scopeName = exportScopeLabel({ groupId, subjectId });
       const exporters = {
-        attendance: () => {
+        attendance: async () => {
           const file = exportAttendance({ groupId, subjectId });
-          return rowsToXlsx(`poseschaemost-${stamp}.xlsx`, [
-            { name: 'Сводка', rows: file.studentRows },
-            { name: 'Матрица', rows: file.matrixRows },
-            { name: 'Детализация', rows: file.detailRows },
-          ]);
+          return rowsToXlsx(`poseschaemost-${exportFileSlug(scopeName, 'all')}-${stamp}.xlsx`, [
+            {
+              name: 'Сводка',
+              title: 'Посещаемость · сводка',
+              subtitle: scopeName,
+              rows: [
+                ...exportMetaRows(`Посещаемость · ${scopeName}`),
+                ...(file.studentRows || [['Нет данных']]),
+              ],
+            },
+            {
+              name: 'Матрица',
+              title: 'Матрица явки',
+              subtitle: scopeName,
+              rows: [
+                ...exportMetaRows(`Матрица явки · ${scopeName}`),
+                ...(file.matrixRows || [['Нет данных']]),
+              ],
+            },
+            {
+              name: 'Детализация',
+              title: 'Детализация по занятиям',
+              subtitle: scopeName,
+              rows: [
+                ...exportMetaRows(`Детализация явки · ${scopeName}`),
+                ...(file.detailRows || [['Нет данных']]),
+              ],
+            },
+          ], { subtitle: scopeName });
         },
-        grades: () => rowsToXlsx(`ocenki-${stamp}.xlsx`, [{ name: 'Оценки', rows: exportGrades({ groupId, subjectId }).rows }]),
-        credits: () => rowsToXlsx(`zachety-${stamp}.xlsx`, [{ name: 'Зачёты', rows: exportCredits({ groupId, subjectId }).rows }]),
-        schedule: () => {
+        grades: async () => rowsToXlsx(
+          `ocenki-${exportFileSlug(scopeName, 'all')}-${stamp}.xlsx`,
+          [{
+            name: 'Оценки',
+            title: 'Оценки',
+            subtitle: scopeName,
+            rows: exportGrades({ groupId, subjectId }).rows,
+          }],
+          { subtitle: scopeName },
+        ),
+        credits: async () => rowsToXlsx(
+          `zachety-${exportFileSlug(scopeName, 'all')}-${stamp}.xlsx`,
+          [{
+            name: 'Зачёты',
+            title: 'Зачёты и экзамены',
+            subtitle: scopeName,
+            rows: exportCredits({ groupId, subjectId }).rows,
+          }],
+          { subtitle: scopeName },
+        ),
+        schedule: async () => {
           const file = exportSchedule({ groupId });
-          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{ name: 'Расписание', rows: file.rows }]);
+          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{
+            name: 'Расписание',
+            title: file.title || 'Расписание',
+            subtitle: scopeName,
+            rows: file.rows,
+          }], { subtitle: scopeName });
         },
-        roster: () => {
+        roster: async () => {
           const file = exportRoster({ groupId });
-          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{ name: 'Ученики', rows: file.rows }]);
+          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{
+            name: 'Ученики',
+            title: 'Список учеников',
+            subtitle: scopeName,
+            rows: file.rows,
+          }], { subtitle: scopeName });
         },
-        groups: () => {
+        groups: async () => {
           const file = exportGroupsList();
-          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{ name: 'Группы', rows: file.rows }]);
+          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{
+            name: 'Группы',
+            title: 'Группы',
+            rows: file.rows,
+          }]);
         },
-        subjects: () => {
+        subjects: async () => {
           const file = exportSubjectsList({ groupId });
-          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{ name: 'Предметы', rows: file.rows }]);
+          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{
+            name: 'Предметы',
+            title: 'Предметы',
+            subtitle: scopeName,
+            rows: file.rows,
+          }], { subtitle: scopeName });
         },
-        teachers: () => {
+        teachers: async () => {
           const file = exportTeachersList();
-          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{ name: 'Педагоги', rows: file.rows }]);
+          return rowsToXlsx(file.filename.replace(/\.csv$/i, '.xlsx'), [{
+            name: 'Педагоги',
+            title: 'Педагоги',
+            rows: file.rows,
+          }]);
         },
       };
       const build = exporters[kind];
       if (!build) fail(404, 'Неизвестный тип выгрузки');
-      const book = build();
+      const book = await build();
       sendBinary(res, book.filename, book.buffer, book.contentType);
       return;
     }

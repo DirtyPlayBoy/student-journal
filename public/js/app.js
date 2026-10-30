@@ -1103,12 +1103,12 @@ function exportToolbar({ groupId, subjectId, compact = false } = {}) {
   const scope = subjectId ? 'предмету' : (groupId ? 'группе' : 'всем группам');
   const tiles = [
     exportTile({
-      kind: 'workbook', title: 'Excel · вся книга', hint: 'Явка, оценки, зачёты, список, расписание',
+      kind: 'workbook', title: 'Excel · вся книга', hint: 'Оформленный отчёт: явка, оценки, список, сетка',
       primary: true, attrs,
     }),
-    exportTile({ kind: 'summary', title: 'Сводка + матрица', hint: 'Таблица явки по занятиям', attrs }),
-    exportTile({ kind: 'attendance', title: 'Посещаемость', hint: 'Сводка и детализация', attrs }),
-    gradesOn() ? exportTile({ kind: 'grades', title: 'Оценки', hint: 'Все работы и баллы', attrs }) : '',
+    exportTile({ kind: 'summary', title: 'Сводка + матрица', hint: 'Цветная таблица явки по занятиям', attrs }),
+    exportTile({ kind: 'attendance', title: 'Посещаемость', hint: 'Сводка, матрица и детализация', attrs }),
+    gradesOn() ? exportTile({ kind: 'grades', title: 'Оценки', hint: 'Работы с подсветкой баллов', attrs }) : '',
     exportTile({ kind: 'credits', title: 'Зачёты', hint: 'Зачёты и экзамены', attrs }),
     exportTile({ kind: 'roster', title: 'Список учеников', hint: 'ФИО, группа, доступ', attrs }),
     !subjectId ? exportTile({ kind: 'subjects', title: 'Предметы', hint: 'Занятия и пары', attrs }) : '',
@@ -1127,9 +1127,9 @@ function exportToolbar({ groupId, subjectId, compact = false } = {}) {
     <div class="export-panel-head">
       <div>
         <div class="kicker">Выгрузка</div>
-        <strong>Excel и CSV по ${scope}</strong>
+        <strong>Красивый Excel по ${scope}</strong>
       </div>
-      <span class="muted">Готовые таблицы для отчётов и печати</span>
+      <span class="muted">Шапка заведения, цветные отметки, готово к печати</span>
     </div>
     <div class="export-grid">${tiles}</div>
     <details class="export-more">
@@ -1148,7 +1148,7 @@ function studentExportToolbar(studentId) {
         <div class="kicker">Выгрузка</div>
         <strong>Карточка ученика</strong>
       </div>
-      <span class="muted">Excel с несколькими листами</span>
+      <span class="muted">Оформленный Excel · несколько листов</span>
     </div>
     <div class="export-grid tight">
       ${exportTile({
@@ -1201,9 +1201,9 @@ function listsExportToolbar({ groupId } = {}) {
     <div class="export-panel-head">
       <div>
         <div class="kicker">Выгрузка</div>
-        <strong>${groupName ? `Файлы · ${esc(groupName)}` : 'Списки Excel / CSV'}</strong>
+        <strong>${groupName ? `Excel · ${esc(groupName)}` : 'Списки Excel'}</strong>
       </div>
-      <span class="muted">Скачивается сразу</span>
+      <span class="muted">С фирменной шапкой и подсветкой</span>
     </div>
     <div class="export-grid tight">${tiles}</div>
   </section>`;

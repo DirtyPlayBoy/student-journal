@@ -5339,7 +5339,9 @@ body.modal-open { overflow: hidden; }
 .group-list { gap: 12px; }
 
 .export-panel {
-  background: var(--paper);
+  background:
+    radial-gradient(120% 80% at 100% 0%, rgba(21, 122, 75, 0.08), transparent 55%),
+    var(--paper);
   border: 1px solid rgba(26, 107, 71, 0.12);
 }
 .export-panel.compact { padding: 14px; }
