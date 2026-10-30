@@ -2228,8 +2228,28 @@ function journal(subjectId) {
     gradesByWork.get(row.work_id)[row.student_id] = row.value;
   }
 
+  const normKey = normalizeSubjectKey(subject.name);
+  const siblings = db.prepare(`
+    SELECT s.id, s.name, s.group_id AS groupId, g.name AS groupName,
+      (SELECT COUNT(*) FROM lessons l WHERE l.subject_id = s.id) AS lessonCount,
+      (SELECT COUNT(*) FROM credits c WHERE c.subject_id = s.id) AS creditCount,
+      (SELECT COUNT(*) FROM works w WHERE w.subject_id = s.id) AS workCount
+    FROM subjects s JOIN groups g ON g.id = s.group_id
+    WHERE s.norm_key = ?
+    ORDER BY g.name COLLATE NOCASE, s.id
+  `).all(normKey).map((row) => ({
+    id: row.id,
+    name: row.name,
+    groupId: Number(row.groupId),
+    groupName: row.groupName,
+    lessonCount: row.lessonCount || 0,
+    creditCount: row.creditCount || 0,
+    workCount: row.workCount || 0,
+  }));
+
   return {
     subject,
+    siblings,
     students,
     lessons: lessonRows.map((row) => ({ ...row, marks: marksByLesson.get(row.id) || {} })),
     credits: creditRows.map((row) => ({ ...row, results: resultsByCredit.get(row.id) || {} })),
@@ -5232,6 +5252,41 @@ async function handleApi(req, res, path) {
     return;
   }
 
+  if (method === 'POST' && path === '/api/schedule/parser/parse-cell') {
+    assertPermission(user, 'schedule.import');
+    const body = await readBody(req);
+    const { parseCellText, suggestRulesFromExample, DEFAULT_SEPARATOR_RULES } = await import('./lib/schedule/text-parser.js');
+    const rules = Array.isArray(body.separators) && body.separators.length
+      ? body.separators
+      : DEFAULT_SEPARATOR_RULES;
+    const text = String(body.text || '');
+    const parsed = parseCellText(text, rules);
+    const suggested = suggestRulesFromExample(text, body.labels || {});
+    send(res, 200, { parsed, suggested });
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/schedule/parser/suggest') {
+    assertPermission(user, 'schedule.import');
+    assertExcelEnabled();
+    const body = await readBody(req);
+    if (body.groupId) assertGroupAccess(user, body.groupId);
+    const { suggestDayMappings, applySuggestionToConfig } = await import('./lib/schedule/layout-suggest.js');
+    const preview = body.sourceId
+      ? schedulePlans.previewSource(db, dataDir, parseId(body.sourceId), { maxRows: 120, maxCols: 40 })
+      : null;
+    const sheetName = body.sheet || preview?.workbook?.sheetNames?.[0] || '';
+    const sheet = (preview?.workbook?.sheets || []).find((s) => s.name === sheetName)
+      || preview?.workbook?.sheets?.[0];
+    const suggestion = suggestDayMappings(sheet, { groupCode: body.groupCode || '' });
+    let config = body.config || null;
+    if (config && suggestion.confidence > 0.4) {
+      config = applySuggestionToConfig(config, suggestion, { sheetName: sheet?.name || sheetName });
+    }
+    send(res, 200, { suggestion, config, sheetName: sheet?.name || sheetName });
+    return;
+  }
+
   if (method === 'POST' && path === '/api/schedule/parser/preview') {
     assertPermission(user, 'schedule.import');
     assertExcelEnabled();
@@ -6140,34 +6195,69 @@ async function handleApi(req, res, path) {
     assertPermission(user, 'subjects.manage');
     const body = await readBody(req);
     const name = cleanText(body.name, 'название предмета');
-    const group = requireGroup(body.groupId);
-    assertGroupAccess(user, group.id);
-    const existing = findSubjectInGroup(group.id, name);
-    if (existing) fail(400, `Такой предмет уже есть: «${existing.name}»`);
-    try {
-      const key = normalizeSubjectKey(name);
-      const info = db.prepare(`
-        INSERT INTO subjects (name, group_id, created_at, norm_key) VALUES (?, ?, ?, ?)
-      `).run(name, group.id, Date.now(), key);
-      const subjectId = Number(info.lastInsertRowid);
-      writeAudit(user, {
-        action: 'subjects.create',
-        entity: 'subject',
-        entityId: subjectId,
-        groupId: group.id,
-        summary: `Добавлен предмет «${name}» · ${group.name}`,
-      }, req);
-      send(res, 201, { id: subjectId });
-    } catch (error) {
-      constraintMessage(error, 'Такой предмет уже есть в этой группе');
+    const rawIds = Array.isArray(body.groupIds) && body.groupIds.length
+      ? body.groupIds
+      : [body.groupId];
+    const groupIds = [...new Set(rawIds.map(parseId).filter((id) => id > 0))];
+    if (!groupIds.length) fail(400, 'Укажите группу');
+    const key = normalizeSubjectKey(name);
+    const created = [];
+    const skipped = [];
+    const insert = db.prepare(`
+      INSERT INTO subjects (name, group_id, created_at, norm_key) VALUES (?, ?, ?, ?)
+    `);
+    const tx = db.transaction(() => {
+      for (const groupId of groupIds) {
+        const group = requireGroup(groupId);
+        assertGroupAccess(user, group.id);
+        const existing = findSubjectInGroup(group.id, name);
+        if (existing) {
+          skipped.push({ id: existing.id, groupId: group.id, groupName: group.name });
+          continue;
+        }
+        try {
+          const info = insert.run(name, group.id, Date.now(), key);
+          const subjectId = Number(info.lastInsertRowid);
+          created.push({ id: subjectId, groupId: group.id, groupName: group.name });
+          writeAudit(user, {
+            action: 'subjects.create',
+            entity: 'subject',
+            entityId: subjectId,
+            groupId: group.id,
+            summary: `Добавлен предмет «${name}» · ${group.name}`,
+          }, req);
+        } catch (error) {
+          constraintMessage(error, 'Такой предмет уже есть в этой группе');
+        }
+      }
+    });
+    tx();
+    if (!created.length) {
+      fail(400, skipped.length
+        ? `Такой предмет уже есть: ${skipped.map((row) => row.groupName).join(', ')}`
+        : 'Не удалось создать предмет');
     }
+    send(res, 201, {
+      id: created[0].id,
+      ids: created.map((row) => row.id),
+      created: created.length,
+      skipped: skipped.length,
+      name,
+    });
     return;
   }
 
   match = path.match(/^\/api\/subjects\/(\d+)$/);
   if (match && method === 'GET') {
     assertSubjectAccess(user, match[1]);
-    send(res, 200, journal(parseId(match[1])));
+    const payload = journal(parseId(match[1]));
+    const allowed = (user?.role === 'admin' || hasPermission(user, 'users.manage'))
+      ? null
+      : new Set((user?.groupIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0));
+    if (allowed) {
+      payload.siblings = (payload.siblings || []).filter((row) => allowed.has(Number(row.groupId)));
+    }
+    send(res, 200, payload);
     return;
   }
   if (match && (method === 'PATCH' || method === 'DELETE')) {

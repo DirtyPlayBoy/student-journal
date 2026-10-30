@@ -298,6 +298,11 @@ function parseHash() {
   if ((match = hash.match(/^#\/subject\/(\d+)(?:\/(attendance|credits|grades))?$/))) {
     return { name: 'subject', subjectId: Number(match[1]), tab: match[2] || 'attendance' };
   }
+  if ((match = hash.match(/^#\/subjects\/hub\/(.+)$/))) {
+    let key = match[1];
+    try { key = decodeURIComponent(key); } catch { /* keep raw */ }
+    return { name: 'subject-hub', key };
+  }
   if ((match = hash.match(/^#\/stats\/student\/(\d+)$/))) {
     return { name: 'student-stats', studentId: Number(match[1]) };
   }
@@ -579,7 +584,9 @@ function navOn(key) {
   if (key === 'calendar') return name === 'calendar' || name === 'calendar-day';
   if (key === 'schedule-edit') return name === 'schedule';
   if (key === 'settings') return name === 'settings' || name === 'users' || name === 'audit';
-  if (key === 'subjects') return name === 'subjects' || name === 'subject' || name === 'lesson' || name === 'credit';
+  if (key === 'subjects') {
+    return name === 'subjects' || name === 'subject-hub' || name === 'subject' || name === 'lesson' || name === 'credit';
+  }
   return false;
 }
 
@@ -614,7 +621,7 @@ function pageTitle() {
   if (route.name === 'teachers') return 'Педагоги';
   if (route.name === 'teacher') return 'Педагог';
   if (route.name === 'teacher-schedule') return 'Моё расписание';
-  if (route.name === 'subjects') return 'Предметы';
+  if (route.name === 'subjects' || route.name === 'subject-hub') return 'Предметы';
   if (route.name === 'stats') return 'Электронный дневник';
   if (route.name === 'student-stats') return 'Карточка ученика';
   if (route.name === 'diary') return 'Мои пропуски';
@@ -656,8 +663,14 @@ function backHref() {
   }
   if (route.name === 'users' || route.name === 'audit') return '#/settings';
   if (route.name === 'stats' && route.groupId) return '#/stats';
+  if (route.name === 'subject-hub') return '#/subjects';
   if (route.name === 'subject') {
-    const groupId = S.journal?.subject.groupId;
+    const subject = S.journal?.subject;
+    const siblings = S.journal?.siblings || [];
+    if (subject && siblings.length > 1) {
+      return `#/subjects/hub/${encodeURIComponent(normalizeSubjectKey(subject.name))}`;
+    }
+    const groupId = subject?.groupId;
     return groupId ? `#/group/${groupId}` : '#/subjects';
   }
   return '';
@@ -917,26 +930,89 @@ function groupCard(group) {
   </article>`;
 }
 
+function normalizeSubjectKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[«»""„‟‹›'\u0060´]/g, '')
+    .replace(/№\s*/g, ' ')
+    .replace(/[.,;:!?()[\]{}]/g, ' ')
+    .replace(/[-–—_/\\|+＋]+/g, ' ')
+    .replace(/(?:^|\s)(?:лекция|лекции|лекц|практика|практики|практ|семинар|семинары|сем|лабораторная|лабораторные|лаб|консультация|конс)(?=\s|$)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function subjectCountPills(row) {
+  return `<span class="count-row">
+    <span class="count-pill">${row.lessonCount || 0}<small>зан.</small></span>
+    <span class="count-pill">${row.scheduleCount || 0}<small>пар</small></span>
+    <span class="count-pill">${row.creditCount || 0}<small>зач.</small></span>
+    <span class="count-pill">${row.workCount || 0}<small>оц.</small></span>
+  </span>`;
+}
+
 function subjectCard(subject) {
-  const counts = [
-    subject.scheduleCount ? `${subject.scheduleCount} в сетке` : null,
-    `${subject.lessonCount || 0} занятий`,
-    subject.creditCount ? `${subject.creditCount} зач.` : null,
-    subject.workCount ? `${subject.workCount} оценок` : null,
-  ].filter(Boolean).join(' · ');
   return `<article class="card row-card subject-card" data-search="${esc(`${subject.name} ${subject.groupName}`)}" data-group="${subject.groupId}">
     <a class="card-main" href="#/subject/${subject.id}/attendance">
       <strong>${esc(subject.name)}</strong>
       <span class="muted">${esc(subject.groupName)}</span>
-      <span class="count-row">
-        <span class="count-pill">${subject.lessonCount || 0}<small>зан.</small></span>
-        <span class="count-pill">${subject.scheduleCount || 0}<small>пар</small></span>
-        <span class="count-pill">${subject.creditCount || 0}<small>зач.</small></span>
-        <span class="count-pill">${subject.workCount || 0}<small>оц.</small></span>
-      </span>
-      <span class="sr-only">${esc(counts)}</span>
+      ${subjectCountPills(subject)}
     </a>
     ${can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${subject.id}" aria-label="Изменить предмет">${icon.edit}</button>` : ''}
+  </article>`;
+}
+
+function clusterSubjectsByName(subjects) {
+  const buckets = new Map();
+  for (const subject of subjects || []) {
+    const key = normalizeSubjectKey(subject.name) || `id:${subject.id}`;
+    const list = buckets.get(key) || [];
+    list.push(subject);
+    buckets.set(key, list);
+  }
+  return [...buckets.entries()].map(([key, items]) => {
+    const sorted = [...items].sort((a, b) => a.groupName.localeCompare(b.groupName, 'ru') || a.id - b.id);
+    const name = [...sorted].sort((a, b) => String(b.name || '').length - String(a.name || '').length || a.id - b.id)[0].name;
+    return {
+      key,
+      name,
+      items: sorted,
+      lessonCount: sorted.reduce((sum, row) => sum + (Number(row.lessonCount) || 0), 0),
+      scheduleCount: sorted.reduce((sum, row) => sum + (Number(row.scheduleCount) || 0), 0),
+      creditCount: sorted.reduce((sum, row) => sum + (Number(row.creditCount) || 0), 0),
+      workCount: sorted.reduce((sum, row) => sum + (Number(row.workCount) || 0), 0),
+    };
+  });
+}
+
+function subjectClusterCard(cluster) {
+  const search = `${cluster.name} ${cluster.items.map((item) => item.groupName).join(' ')}`;
+  const multi = cluster.items.length > 1;
+  const href = multi
+    ? `#/subjects/hub/${encodeURIComponent(cluster.key)}`
+    : `#/subject/${cluster.items[0].id}/attendance`;
+  const groups = multi
+    ? `<div class="subject-group-rows" role="list">
+        ${cluster.items.map((item) => `<div class="subject-group-row" role="listitem">
+          <a href="#/subject/${item.id}/attendance">
+            <strong>${esc(item.groupName)}</strong>
+            <span class="muted">${item.lessonCount || 0} зан. · ${item.scheduleCount || 0} пар${item.creditCount ? ` · ${item.creditCount} зач.` : ''}${item.workCount ? ` · ${item.workCount} оц.` : ''}</span>
+          </a>
+          ${can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${item.id}" aria-label="Изменить в группе ${esc(item.groupName)}">${icon.edit}</button>` : ''}
+        </div>`).join('')}
+      </div>`
+    : `<span class="muted">${esc(cluster.items[0].groupName)}</span>`;
+  return `<article class="card subject-cluster-card${multi ? ' multi' : ' row-card subject-card'}" data-search="${esc(search)}" data-key="${esc(cluster.key)}">
+    <div class="subject-cluster-top">
+      <a class="card-main subject-cluster-main" href="${href}">
+        <strong>${esc(cluster.name)}</strong>
+        ${multi ? `<span class="muted">${ru(cluster.items.length, 'группа', 'группы', 'групп')} · откройте нужную</span>` : ''}
+        ${subjectCountPills(cluster)}
+      </a>
+      ${!multi && can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${cluster.items[0].id}" aria-label="Изменить предмет">${icon.edit}</button>` : ''}
+    </div>
+    ${groups}
   </article>`;
 }
 
@@ -1411,6 +1487,7 @@ function routeAllowed(route) {
     case 'teacher-schedule':
       return canNav('my-schedule');
     case 'subjects':
+    case 'subject-hub':
       return canNav('subjects');
     case 'subject':
     case 'lesson':
@@ -2915,7 +2992,8 @@ function studentsPage() {
 
 function sortSubjects(list, mode) {
   const rows = [...list];
-  const byName = (a, b) => a.name.localeCompare(b.name, 'ru') || a.groupName.localeCompare(b.groupName, 'ru');
+  const byName = (a, b) => a.name.localeCompare(b.name, 'ru')
+    || String(a.groupName || '').localeCompare(String(b.groupName || ''), 'ru');
   if (mode === 'name') return rows.sort(byName);
   const key = mode === 'pairs' ? 'scheduleCount'
     : mode === 'credits' ? 'creditCount'
@@ -2941,16 +3019,29 @@ function subjectSortChips() {
 function subjectsPage() {
   const groups = S.overview?.groups || [];
   const subjects = S.overview?.subjects || [];
-  const filtered = sortSubjects(filterByGroup(subjects), S.subjectSort || 'lessons');
-  const cards = filtered.map((subject) => {
-    const hidden = hiddenByQuery(`${subject.name} ${subject.groupName}`);
-    return subjectCard(subject).replace('data-search=', `${hidden ? 'hidden' : ''} data-search=`);
+  const scoped = filterByGroup(subjects);
+  const clustered = S.groupFilter
+    ? sortSubjects(scoped, S.subjectSort || 'lessons').map((subject) => ({
+      key: normalizeSubjectKey(subject.name) || `id:${subject.id}`,
+      name: subject.name,
+      items: [subject],
+      lessonCount: subject.lessonCount || 0,
+      scheduleCount: subject.scheduleCount || 0,
+      creditCount: subject.creditCount || 0,
+      workCount: subject.workCount || 0,
+    }))
+    : sortSubjects(clusterSubjectsByName(scoped), S.subjectSort || 'lessons');
+  const cards = clustered.map((cluster) => {
+    const search = `${cluster.name} ${cluster.items.map((item) => item.groupName).join(' ')}`;
+    const hidden = hiddenByQuery(search);
+    return subjectClusterCard(cluster).replace('data-search=', `${hidden ? 'hidden' : ''} data-search=`);
   }).join('');
+  const multiCount = clustered.filter((cluster) => cluster.items.length > 1).length;
   const dupes = (S.subjectDupes?.clusters || []).filter((cluster) => !S.groupFilter || String(cluster.groupId) === String(S.groupFilter));
   const dupeBanner = dupes.length
     ? `<div class="card pad dupe-banner">
         <strong>Похожие предметы (${dupes.length})</strong>
-        <p class="muted">Объедините дубли, чтобы оценки и явка не разъезжались по разным карточкам.</p>
+        <p class="muted">Объедините дубли внутри одной группы, чтобы оценки и явка не разъезжались.</p>
         ${dupes.map((cluster) => `<div class="dupe-cluster">
           <div class="muted">${esc(cluster.groupName)} · ${cluster.subjects.map((s) => esc(s.name)).join(' / ')}</div>
           <button class="btn btn-ghost btn-small" type="button" data-act="merge-subjects" data-keep="${cluster.subjects[0].id}" data-ids="${cluster.subjects.slice(1).map((s) => s.id).join(',')}">Объединить</button>
@@ -2962,24 +3053,74 @@ function subjectsPage() {
       <div class="section-head subjects-head" style="margin:0">
         <div>
           <div class="kicker">Каталог</div>
-          <h2>${ru(filtered.length, 'предмет', 'предмета', 'предметов')}</h2>
-          <p class="muted tight subjects-lead">Сортировка по счётчикам · дубли не создаются</p>
+          <h2>${ru(clustered.length, 'предмет', 'предмета', 'предметов')}</h2>
+          <p class="muted tight subjects-lead">${S.groupFilter
+            ? 'Фильтр по группе'
+            : (multiCount
+              ? `Одинаковые названия собраны вместе · ${ru(multiCount, 'предмет с несколькими группами', 'предмета с несколькими группами', 'предметов с несколькими группами')}`
+              : 'Один предмет — несколько групп внутри карточки')}</p>
         </div>
         ${canAdd ? `<button class="btn btn-primary btn-small" type="button" data-act="add-subject">Добавить</button>` : ''}
       </div>
     </section>
     ${listsExportToolbar({ groupId: S.groupFilter || undefined })}
     ${dupeBanner}
-    <input id="q" class="search" placeholder="Поиск предмета" value="${esc(S.q)}" autocomplete="off">
-    ${groups.length ? chips(groups) : ''}
+    <input id="q" class="search" placeholder="Поиск предмета или группы" value="${esc(S.q)}" autocomplete="off">
+    ${groups.length ? chips(groups, { counts: false }) : ''}
     ${subjectSortChips()}
-    ${filtered.length ? `<div class="list" id="list">${cards}</div><p id="empty-filter" class="muted" hidden>Ничего не найдено</p>` : `<div class="empty"><h2>Предметов нет</h2><p>${canAdd ? 'Добавьте предмет или подтяните расписание из Excel.' : 'Попросите доступ «Добавлять предметы».'}</p>${canAdd ? '<button class="btn btn-primary" type="button" data-act="add-subject">Добавить предмет</button>' : ''}</div>`}`;
+    ${clustered.length ? `<div class="list subject-catalog" id="list">${cards}</div><p id="empty-filter" class="muted" hidden>Ничего не найдено</p>` : `<div class="empty"><h2>Предметов нет</h2><p>${canAdd ? 'Добавьте предмет сразу в нужные группы или подтяните расписание из Excel.' : 'Попросите доступ «Добавлять предметы».'}</p>${canAdd ? '<button class="btn btn-primary" type="button" data-act="add-subject">Добавить предмет</button>' : ''}</div>`}`;
+}
+
+function subjectHubPage() {
+  const key = S.route?.key || '';
+  const subjects = S.overview?.subjects || [];
+  const items = subjects
+    .filter((subject) => normalizeSubjectKey(subject.name) === key)
+    .sort((a, b) => a.groupName.localeCompare(b.groupName, 'ru') || a.id - b.id);
+  if (!items.length) return missingHtml();
+  const name = [...items].sort((a, b) => String(b.name || '').length - String(a.name || '').length || a.id - b.id)[0].name;
+  const totals = {
+    lessonCount: items.reduce((sum, row) => sum + (Number(row.lessonCount) || 0), 0),
+    scheduleCount: items.reduce((sum, row) => sum + (Number(row.scheduleCount) || 0), 0),
+    creditCount: items.reduce((sum, row) => sum + (Number(row.creditCount) || 0), 0),
+    workCount: items.reduce((sum, row) => sum + (Number(row.workCount) || 0), 0),
+  };
+  return `<section class="page-hero subjects-hero card pad subject-hub-hero">
+      <div class="kicker">Предмет · ${ru(items.length, 'группа', 'группы', 'групп')}</div>
+      <h2>${esc(name)}</h2>
+      <p class="muted">Журнал у каждой группы свой — откройте нужную строку.</p>
+      ${subjectCountPills(totals)}
+    </section>
+    <div class="list subject-hub-list">
+      ${items.map((item) => `<article class="card pad subject-hub-group">
+        <div class="subject-hub-group-head">
+          <div>
+            <strong>${esc(item.groupName)}</strong>
+            <div class="muted">${item.lessonCount || 0} зан. · ${item.scheduleCount || 0} пар${item.creditCount ? ` · ${item.creditCount} зач.` : ''}${item.workCount ? ` · ${item.workCount} оц.` : ''}</div>
+          </div>
+          ${can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${item.id}" aria-label="Изменить">${icon.edit}</button>` : ''}
+        </div>
+        <div class="subject-hub-actions">
+          <a class="btn btn-primary btn-small" href="#/subject/${item.id}/attendance">Явка</a>
+          <a class="btn btn-ghost btn-small" href="#/subject/${item.id}/credits">Зачёты</a>
+          ${gradesOn() ? `<a class="btn btn-ghost btn-small" href="#/subject/${item.id}/grades">Оценки</a>` : ''}
+          <a class="btn btn-ghost btn-small" href="#/group/${item.groupId}">Группа</a>
+        </div>
+      </article>`).join('')}
+    </div>`;
 }
 
 function subjectTabs(subject, tab) {
   const link = (key, full, short) => `<a href="#/subject/${subject.id}/${key}" class="${tab === key ? 'on' : ''}"><span class="full">${full}</span><span class="short">${short}</span></a>`;
-  return `<div class="intro"><div><div class="kicker">${esc(subject.groupName)}</div><h2>${esc(subject.name)}</h2></div>
+  const siblings = (S.journal?.siblings || []).slice().sort((a, b) => a.groupName.localeCompare(b.groupName, 'ru'));
+  const groupSwitch = siblings.length > 1
+    ? `<div class="chips subject-group-switch scroll-chips" role="toolbar" aria-label="Группы предмета">
+        ${siblings.map((row) => `<a class="chip${row.id === subject.id ? ' on' : ''}" href="#/subject/${row.id}/${tab}">${esc(row.groupName)}</a>`).join('')}
+      </div>`
+    : '';
+  return `<div class="intro"><div><div class="kicker">${esc(subject.groupName)}${siblings.length > 1 ? ` · ${siblings.length} групп` : ''}</div><h2>${esc(subject.name)}</h2></div>
     ${can('subjects.manage') ? `<button class="btn btn-ghost btn-small" type="button" data-act="edit-subject" data-id="${subject.id}">Изменить</button>` : ''}</div>
+    ${groupSwitch}
     <div class="tabs">
       ${link('attendance', 'Посещаемость', 'Явка')}
       ${link('credits', 'Зачёты', 'Зачёты')}
@@ -3406,6 +3547,7 @@ function pageHtml() {
     case 'teacher': return teacherPage();
     case 'teacher-schedule': return teacherSchedulePage();
     case 'subjects': return subjectsPage();
+    case 'subject-hub': return subjectHubPage();
     case 'subject': return subjectPage();
     case 'lesson': return lessonPage();
     case 'credit': return creditPage();
@@ -3881,16 +4023,25 @@ function openSubjectModal(subject, presetGroup) {
   }
   const fromList = S.overview?.subjects?.find((item) => item.id === Number(subject?.id));
   const editing = subject?.id ? (fromList || subject) : null;
-  if (!editing) {
-    const groups = S.overview?.groups || [];
-    if (!groups.length) { toast('Сначала создайте группу'); return; }
-  }
-  const selected = editing?.groupId || presetGroup || S.route.groupId || S.overview.groups[0].id;
+  const groups = S.overview?.groups || [];
+  if (!editing && !groups.length) { toast('Сначала создайте группу'); return; }
+  const selected = Number(editing?.groupId || presetGroup || S.route.groupId || groups[0]?.id || 0);
+  const groupPicks = !editing
+    ? `<div class="field"><span>Группы</span>
+        <div class="check-list subject-group-picks">
+          ${groups.map((group) => `<label class="check-row">
+            <input type="checkbox" name="groupIds" value="${group.id}" ${Number(group.id) === selected ? 'checked' : ''}>
+            <span>${esc(group.name)}</span>
+          </label>`).join('')}
+        </div>
+        <p class="muted tight">Один предмет — отметьте все группы, где он читается. Журнал у каждой группы свой.</p>
+      </div>`
+    : `<p class="muted">${esc(editing.groupName)}</p>`;
   openModal(modalWrap(`<h2>${editing ? 'Предмет' : 'Новый предмет'}</h2>
     <form data-form="save-subject">
       <input type="hidden" name="id" value="${editing?.id || ''}">
       <label class="field"><span>Название</span><input name="name" required maxlength="120" value="${esc(editing?.name || '')}" placeholder="Алгебра"></label>
-      ${editing ? `<p class="muted">${esc(editing.groupName)}</p>` : `<label class="field"><span>Группа</span><select name="groupId" required>${groupOptions(selected)}</select></label>`}
+      ${groupPicks}
       ${formActions('Сохранить', editing ? `<button class="btn btn-danger" type="button" data-act="delete-subject" data-id="${editing.id}">Удалить</button>` : '')}
     </form>`));
 }

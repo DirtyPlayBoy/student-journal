@@ -28,9 +28,52 @@
     activeWeekday: 1,
     zoom: 1,
     selectedA1: null,
+    rangeAnchor: null,
     sheetName: '',
     draftResult: null,
+    suggestInfo: null,
+    busy: false,
   };
+
+  function dayCoverageHtml(week) {
+    const days = week?.days || {};
+    return `<div class="pc-day-cover" aria-label="Разметка дней">${[1, 2, 3, 4, 5, 6].map((d) => {
+      const map = days[String(d)];
+      const ready = !!(map && (
+        (map.mode === 'manual' && (map.cells || []).length)
+        || (map.mode === 'range' && map.range)
+        || map.mode === 'by_day_header'
+      ));
+      const count = map?.mode === 'manual' ? (map.cells || []).length : (ready ? '✓' : '·');
+      return `<button type="button" class="pc-cover-day${state.activeWeekday === d ? ' on' : ''}${ready ? ' ready' : ''}" data-pc-day="${d}">
+        <span>${WEEKDAY_LABELS[d]}</span><em>${count}</em>
+      </button>`;
+    }).join('')}</div>`;
+  }
+
+  function applyPreset(kind) {
+    const week = currentWeekConfig();
+    if (!week) return;
+    const day = ensureDay(week, state.activeWeekday);
+    if (kind === 'header') {
+      day.mode = 'by_day_header';
+      day.dayCol = day.dayCol ?? 0;
+      day.pairCol = day.pairCol ?? 1;
+      day.discCol = day.discCol ?? 2;
+      day.weekday = state.activeWeekday;
+      day.skipEmpty = true;
+      day.cells = [];
+      day.range = '';
+    } else if (kind === 'range') {
+      day.mode = 'range';
+      day.skipEmpty = true;
+      day.startPair = 1;
+      if (!day.range && state.selectedA1) day.range = state.selectedA1;
+    } else {
+      day.mode = 'manual';
+      day.cells = day.cells || [];
+    }
+  }
 
   function host() {
     return global.JournalScheduleHost || {};
@@ -253,47 +296,71 @@
     const cells = (day.cells || []).map((c, i) => {
       const a1 = typeof c === 'string' ? c : c.a1;
       const pair = typeof c === 'object' ? (c.pairNum || i + 1) : i + 1;
+      const preview = cellValue(a1);
       return `<tr>
         <td>${pair}</td>
         <td><code>${esc(a1)}</code></td>
+        <td class="muted pc-cell-snip">${esc((preview || '').slice(0, 42))}${preview && preview.length > 42 ? '…' : ''}</td>
         <td><button type="button" class="btn btn-ghost btn-small" data-pc-act="rm-cell" data-i="${i}">✕</button></td>
       </tr>`;
     }).join('');
+    const hint = day.mode === 'manual'
+      ? 'Клик по ячейке в таблице сразу добавляет пару. Можно также выделить диапазон: первая точка → вторая.'
+      : day.mode === 'range'
+        ? 'Укажите диапазон вроде C5:C10 или кликните две ячейки подряд (начало и конец).'
+        : 'Укажите номера столбцов (0 = A). Парсер найдёт блоки под «Понедельник», «Вторник»…';
     return `<div class="pc-pane pc-split">
-      <div>
+      <div class="pc-days-side">
         <div class="chips">${(plan?.weeks || []).map((w) => `
           <button type="button" class="chip${state.activeWeekIndex === w.weekIndex ? ' on' : ''}" data-pc-week="${w.weekIndex}">${esc(w.label)}</button>
         `).join('')}
           <button type="button" class="chip" data-pc-act="add-week">+</button>
         </div>
-        <div class="chips">${[1, 2, 3, 4, 5, 6, 7].map((d) => `
-          <button type="button" class="chip${state.activeWeekday === d ? ' on' : ''}" data-pc-day="${d}">${WEEKDAY_LABELS[d]}</button>
-        `).join('')}</div>
-        <p class="muted">${esc(week?.label || '')} · ${WEEKDAY_FULL[state.activeWeekday]}</p>
-        <label>Режим
+        ${dayCoverageHtml(week)}
+        <p class="muted tight">${esc(week?.label || '')} · <b>${WEEKDAY_FULL[state.activeWeekday]}</b></p>
+        ${state.suggestInfo ? `<div class="pc-suggest-banner">${esc(state.suggestInfo)}</div>` : ''}
+        <div class="pc-preset-row">
+          <button type="button" class="btn btn-primary btn-small" data-pc-act="auto-detect">Автоопределение</button>
+          <button type="button" class="btn btn-ghost btn-small" data-pc-act="preset-header">По заголовку дня</button>
+          <button type="button" class="btn btn-ghost btn-small" data-pc-act="preset-range">Диапазон</button>
+          <button type="button" class="btn btn-ghost btn-small" data-pc-act="preset-manual">Вручную</button>
+        </div>
+        <label class="field"><span>Режим разметки</span>
           <select data-pc="day-mode">
-            <option value="manual"${day.mode === 'manual' ? ' selected' : ''}>Ручной (ячейки)</option>
-            <option value="range"${day.mode === 'range' ? ' selected' : ''}>Диапазон</option>
-            <option value="by_day_header"${day.mode === 'by_day_header' ? ' selected' : ''}>По заголовку дня</option>
+            <option value="manual"${day.mode === 'manual' ? ' selected' : ''}>Вручную (клик по ячейкам)</option>
+            <option value="range"${day.mode === 'range' ? ' selected' : ''}>Диапазон колонки</option>
+            <option value="by_day_header"${day.mode === 'by_day_header' ? ' selected' : ''}>По заголовку дня в столбце</option>
           </select>
         </label>
-        ${day.mode === 'range' ? `<label>Диапазон <input data-pc="day-range" value="${esc(day.range || '')}" placeholder="C3:C7"></label>` : ''}
+        <p class="hint pc-day-hint">${hint}</p>
+        ${day.mode === 'range' ? `<label class="field"><span>Диапазон</span>
+          <input data-pc="day-range" value="${esc(day.range || '')}" placeholder="C3:C7">
+        </label>
+        <label class="field"><span>Столбец номера пары (необяз., 0 = A)</span>
+          <input type="number" data-pc="pair-col" value="${day.pairCol ?? ''}" placeholder="авто">
+        </label>` : ''}
         ${day.mode === 'by_day_header' ? `
-          <label>Столбец дня <input type="number" data-pc="day-col" value="${day.dayCol ?? 0}"></label>
-          <label>Столбец пар <input type="number" data-pc="pair-col" value="${day.pairCol ?? 1}"></label>
-          <label>Столбец дисциплин <input type="number" data-pc="disc-col" value="${day.discCol ?? 2}"></label>
+          <div class="pc-col-grid">
+            <label class="field"><span>Столбец дня (0=A)</span><input type="number" data-pc="day-col" value="${day.dayCol ?? 0}"></label>
+            <label class="field"><span>Столбец пар</span><input type="number" data-pc="pair-col" value="${day.pairCol ?? 1}"></label>
+            <label class="field"><span>Столбец предметов</span><input type="number" data-pc="disc-col" value="${day.discCol ?? 2}"></label>
+          </div>
         ` : ''}
-        <label>Лист недели <input data-pc="week-sheet" value="${esc(week?.sheet || state.sheetName || '')}"></label>
+        <label class="field"><span>Лист этой недели</span>
+          <input data-pc="week-sheet" value="${esc(week?.sheet || state.sheetName || '')}" placeholder="${esc(state.sheetName || 'Лист1')}">
+        </label>
         <div class="editor-actions">
-          <button type="button" class="btn btn-primary btn-small" data-pc-act="use-selected">Использовать выбранную ячейку</button>
-          <button type="button" class="btn btn-ghost btn-small" data-pc-act="copy-day">Копировать день →</button>
+          <button type="button" class="btn btn-primary btn-small" data-pc-act="use-selected">+ Выбранная ячейка</button>
+          <button type="button" class="btn btn-ghost btn-small" data-pc-act="copy-day">Копировать на следующий день</button>
           <button type="button" class="btn btn-ghost btn-small" data-pc-act="copy-week-rules">Копировать неделю →</button>
+          <button type="button" class="btn btn-ghost btn-small" data-pc-act="clear-day">Очистить день</button>
         </div>
-        <table class="pc-mini"><thead><tr><th>Пара</th><th>Ячейка</th><th></th></tr></thead><tbody>${cells || '<tr><td colspan="3" class="muted">Выберите ячейки в таблице</td></tr>'}</tbody></table>
+        <table class="pc-mini"><thead><tr><th>Пара</th><th>Ячейка</th><th>Текст</th><th></th></tr></thead>
+        <tbody>${cells || '<tr><td colspan="4" class="muted">Пока пусто — кликните ячейки предмета в таблице справа</td></tr>'}</tbody></table>
         ${state.selectedA1 ? `<div class="pc-cell-actions card pad">
-          <div class="kicker">Ячейка ${esc(state.selectedA1)}</div>
+          <div class="kicker">Выбрано · ${esc(state.selectedA1)}</div>
           <p class="muted tight">${esc(cellValue(state.selectedA1) || 'пусто')}</p>
-          <label>Использовать как
+          <label class="field"><span>Назначить роль</span>
             <select data-pc="role">
               ${FIELD_ROLES.map((r) => `<option value="${r.id}">${r.label}</option>`).join('')}
             </select>
@@ -301,7 +368,7 @@
           <button type="button" class="btn btn-primary btn-small" data-pc-act="assign-role">Назначить</button>
         </div>` : ''}
       </div>
-      <div>${gridHtml()}</div>
+      <div class="pc-days-grid">${gridHtml()}</div>
     </div>`;
   }
 
@@ -318,12 +385,16 @@
   }
 
   function stepSeparatorsHtml() {
-    const sample = state.selectedA1 ? cellValue(state.selectedA1) : 'Математика (практ. занятие) преп. Давыдова М.А. ауд. 603';
+    const sample = state.selectedA1 ? cellValue(state.selectedA1) : 'Математика (практ. занятие) преп. Иванова И.И. ауд. 201';
     const rules = state.config?.separators || [];
     return `<div class="pc-pane">
-      <h3>Разделители</h3>
-      <p class="muted">Пример ячейки (или выберите в сетке на шаге «Дни»):</p>
-      <textarea data-pc="sample" rows="2">${esc(sample)}</textarea>
+      <div class="pc-pane-head">
+        <h3>Разделители текста</h3>
+        <p class="muted">Как из одной ячейки достать предмет, преподавателя и аудиторию. Проверьте на живом примере.</p>
+      </div>
+      <label class="field"><span>Пример текста ячейки</span>
+        <textarea data-pc="sample" rows="3">${esc(sample)}</textarea>
+      </label>
       <div class="pc-sep-list">${rules.map((r, i) => `
         <div class="pc-sep-row">
           <strong>${esc(r.field)}</strong>
@@ -335,9 +406,11 @@
         <button type="button" class="btn btn-ghost" data-pc-act="add-sep-teacher">+ преп.</button>
         <button type="button" class="btn btn-ghost" data-pc-act="add-sep-room">+ ауд.</button>
         <button type="button" class="btn btn-ghost" data-pc-act="reset-sep">Сбросить к умолчанию</button>
+        <button type="button" class="btn btn-primary" data-pc-act="test-sep">Проверить разбор</button>
       </div>
-      <button type="button" class="btn btn-primary" data-pc-act="test-sep">Проверить на примере</button>
-      <pre class="pc-sep-preview" data-pc="sep-preview"></pre>
+      <div class="pc-sep-preview card pad" data-pc="sep-preview">
+        <p class="muted tight">Нажмите «Проверить разбор» — здесь появятся поля.</p>
+      </div>
     </div>`;
   }
 
@@ -542,9 +615,64 @@
       mount(root);
     });
 
+    function addCellToDay(a1) {
+      const week = currentWeekConfig();
+      const day = ensureDay(week, state.activeWeekday);
+      day.mode = 'manual';
+      day.cells = day.cells || [];
+      if (day.cells.some((c) => (typeof c === 'string' ? c : c.a1) === a1)) {
+        toast('Ячейка уже в списке');
+        return;
+      }
+      day.cells.push({ a1, pairNum: day.cells.length + 1 });
+    }
+
+    function a1Order(a, b) {
+      const pa = String(a).match(/^([A-Z]+)(\d+)$/i);
+      const pb = String(b).match(/^([A-Z]+)(\d+)$/i);
+      if (!pa || !pb) return [a, b];
+      const col = (s) => {
+        let n = 0;
+        for (const ch of s.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+        return n;
+      };
+      const ca = col(pa[1]);
+      const cb = col(pb[1]);
+      const ra = Number(pa[2]);
+      const rb = Number(pb[2]);
+      if (ca === cb) return ra <= rb ? [a, b] : [b, a];
+      return ca <= cb ? [a, b] : [b, a];
+    }
+
     root.querySelectorAll('.pc-cell').forEach((td) => {
       td.addEventListener('click', () => {
-        state.selectedA1 = td.getAttribute('data-a1');
+        const a1 = td.getAttribute('data-a1');
+        state.selectedA1 = a1;
+        if (state.step !== 3) {
+          mount(root);
+          return;
+        }
+        const week = currentWeekConfig();
+        const day = ensureDay(week, state.activeWeekday);
+        if (day.mode === 'manual') {
+          addCellToDay(a1);
+          mount(root);
+          return;
+        }
+        if (day.mode === 'range') {
+          if (!state.rangeAnchor) {
+            state.rangeAnchor = a1;
+            toast(`Начало диапазона: ${a1}`);
+            mount(root);
+            return;
+          }
+          const [from, to] = a1Order(state.rangeAnchor, a1);
+          day.range = from === to ? from : `${from}:${to}`;
+          state.rangeAnchor = null;
+          toast(`Диапазон: ${day.range}`);
+          mount(root);
+          return;
+        }
         mount(root);
       });
     });
@@ -558,6 +686,7 @@
     root.querySelectorAll('[data-pc-day]').forEach((btn) => {
       btn.addEventListener('click', () => {
         state.activeWeekday = Number(btn.getAttribute('data-pc-day'));
+        state.rangeAnchor = null;
         mount(root);
       });
     });
@@ -566,16 +695,75 @@
       const week = currentWeekConfig();
       const day = ensureDay(week, state.activeWeekday);
       day.mode = ev.target.value;
+      if (day.mode === 'by_day_header') day.weekday = state.activeWeekday;
+      state.rangeAnchor = null;
       mount(root);
+    });
+
+    root.querySelector('[data-pc-act="preset-header"]')?.addEventListener('click', () => {
+      applyPreset('header');
+      toast('Режим: по заголовку дня');
+      mount(root);
+    });
+    root.querySelector('[data-pc-act="preset-range"]')?.addEventListener('click', () => {
+      applyPreset('range');
+      toast('Режим: диапазон — кликните начало и конец');
+      mount(root);
+    });
+    root.querySelector('[data-pc-act="preset-manual"]')?.addEventListener('click', () => {
+      applyPreset('manual');
+      toast('Режим: ручные ячейки');
+      mount(root);
+    });
+    root.querySelector('[data-pc-act="clear-day"]')?.addEventListener('click', () => {
+      const week = currentWeekConfig();
+      if (!week?.days) return;
+      week.days[String(state.activeWeekday)] = { mode: 'manual', cells: [] };
+      toast('День очищен');
+      mount(root);
+    });
+    root.querySelector('[data-pc-act="copy-day"]')?.addEventListener('click', () => {
+      const week = currentWeekConfig();
+      const from = ensureDay(week, state.activeWeekday);
+      const nextDay = state.activeWeekday >= 6 ? 1 : state.activeWeekday + 1;
+      week.days[String(nextDay)] = JSON.parse(JSON.stringify({
+        ...from,
+        weekday: nextDay,
+      }));
+      state.activeWeekday = nextDay;
+      toast(`Скопировано → ${WEEKDAY_LABELS[nextDay]}`);
+      mount(root);
+    });
+    root.querySelector('[data-pc-act="auto-detect"]')?.addEventListener('click', async () => {
+      if (!state.sourceId) return toast('Сначала загрузите Excel', 'error');
+      try {
+        const group = (host().S?.overview?.groups || []).find((g) => g.id === state.groupId);
+        const res = await api('/api/schedule/parser/suggest', {
+          method: 'POST',
+          body: {
+            groupId: state.groupId,
+            sourceId: state.sourceId,
+            sheet: state.sheetName,
+            groupCode: group?.scheduleCode || group?.name || '',
+            config: state.config,
+          },
+        });
+        if (res.config) state.config = res.config;
+        state.suggestInfo = res.suggestion?.message
+          || (res.suggestion?.confidence
+            ? `Уверенность ${(res.suggestion.confidence * 100).toFixed(0)}%`
+            : 'Готово');
+        if (res.suggestion?.confidence > 0.4) toast('Раскладка подставлена — проверьте дни');
+        else toast(res.suggestion?.message || 'Не удалось угадать', 'error');
+        mount(root);
+      } catch (err) {
+        toast(err.message || 'Ошибка автоопределения', 'error');
+      }
     });
 
     root.querySelector('[data-pc-act="use-selected"]')?.addEventListener('click', () => {
       if (!state.selectedA1) return toast('Выберите ячейку', 'error');
-      const week = currentWeekConfig();
-      const day = ensureDay(week, state.activeWeekday);
-      day.mode = 'manual';
-      day.cells = day.cells || [];
-      day.cells.push({ a1: state.selectedA1, pairNum: day.cells.length + 1 });
+      addCellToDay(state.selectedA1);
       mount(root);
     });
 
@@ -699,12 +887,38 @@
       });
       mount(root);
     });
+    root.querySelectorAll('[data-pc-act="rm-sep"]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.config.separators.splice(Number(btn.getAttribute('data-i')), 1);
+        mount(root);
+      });
+    });
     root.querySelector('[data-pc-act="test-sep"]')?.addEventListener('click', async () => {
       syncInputs(root);
       const sample = root.querySelector('[data-pc="sample"]')?.value || '';
-      // local quick preview via apply with empty days is heavy; show client hint
       const pre = root.querySelector('[data-pc="sep-preview"]');
-      if (pre) pre.textContent = `Пример будет разобран на сервере при проверке:\n${sample}`;
+      try {
+        const res = await api('/api/schedule/parser/parse-cell', {
+          method: 'POST',
+          body: { text: sample, separators: state.config?.separators },
+        });
+        const f = res.parsed?.fields;
+        if (!f) {
+          if (pre) pre.innerHTML = `<p class="sync-err">Не разобрано: ${(res.parsed?.warnings || []).join(', ') || 'пусто'}</p>`;
+          return;
+        }
+        if (pre) {
+          pre.innerHTML = `
+            <div class="kicker">Результат разбора</div>
+            <p><b>Предмет:</b> ${esc(f.subjectName || '—')}</p>
+            <p><b>Вид:</b> ${esc(f.lessonKind || '—')}</p>
+            <p><b>Преподаватель:</b> ${esc(f.teacher || '—')}</p>
+            <p><b>Аудитория:</b> ${esc(f.room || '—')}</p>`;
+        }
+        toast('Разбор готов');
+      } catch (err) {
+        toast(err.message || 'Ошибка разбора', 'error');
+      }
     });
 
     root.querySelector('[data-pc-act="add-time"]')?.addEventListener('click', () => {

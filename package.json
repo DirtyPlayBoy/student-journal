@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "seed:demo": "node scripts/seed-demo.js",
-    "test": "node --test test/schedule/resolver.test.js test/schedule/parser.test.js test/schedule/migrate.test.js test/telegram-bot.test.js"
+    "test": "node --test test/schedule/resolver.test.js test/schedule/parser.test.js test/schedule/migrate.test.js test/schedule/layout-suggest.test.js test/telegram-bot.test.js"
   },
   "engines": {
     "node": ">=20"
