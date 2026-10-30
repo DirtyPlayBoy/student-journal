@@ -18,6 +18,10 @@ import {
   normalizeGroupCode,
   displayGroupName,
   normalizeSubjectKey,
+  parseGroupCodeParts,
+  bumpGroupCourse,
+  cohortYearFromSuffix,
+  studyYearsLabel,
   normalizeSheetUrl,
   makeSlotKey,
   rowToScheduleEntry,
@@ -59,6 +63,9 @@ import {
   shortNameFromFull,
   suggestUsernameFromName,
   stripTeacherPrefix,
+  extractTeacherNames,
+  teacherNormKeysMatch,
+  KNOWN_TEACHER_CURATORS,
 } from './lib/teachers.js';
 import {
   createTelegramBot,
@@ -377,6 +384,9 @@ db.exec(`
 })();
 
 ensureColumn('groups', 'elder_user_id', 'elder_user_id INTEGER');
+ensureColumn('groups', 'archived', 'archived INTEGER NOT NULL DEFAULT 0');
+ensureColumn('groups', 'study_start_year', 'study_start_year INTEGER');
+ensureColumn('groups', 'study_end_year', 'study_end_year INTEGER');
 ensureColumn('students', 'photo_path', "photo_path TEXT NOT NULL DEFAULT ''");
 ensureColumn('students', 'email', "email TEXT NOT NULL DEFAULT ''");
 ensureColumn('students', 'user_id', 'user_id INTEGER');
@@ -478,6 +488,10 @@ const SETTINGS_DEFAULTS = {
   telegramMultiMode: '0',
   telegramBindings: '[]',
   telegramSchedulePosts: '[]',
+  academicYearStart: String(new Date().getFullYear()),
+  maxCourse: '4',
+  promotionKeepOldAlias: '1',
+  promotionCourseUrls: '{}',
 };
 
 /** Последний прогон фоновой сверки с Excel */
@@ -512,6 +526,22 @@ function getSettings() {
   const kind = INSTITUTION_KINDS.has(map.institutionKind) ? map.institutionKind : 'college';
   const autoMinutes = Math.min(120, Math.max(1, Number(map.scheduleAutoSyncMinutes) || 5));
   const smtpPort = Math.min(65535, Math.max(1, Number(map.smtpPort) || 587));
+  let promotionCourseUrls = {};
+  try {
+    const parsed = JSON.parse(map.promotionCourseUrls || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      promotionCourseUrls = Object.fromEntries(
+        Object.entries(parsed)
+          .map(([k, v]) => [String(k), String(v || '').trim()])
+          .filter(([, v]) => v),
+      );
+    }
+  } catch { /* defaults */ }
+  const academicYearStart = Math.min(
+    2100,
+    Math.max(2000, Number(map.academicYearStart) || new Date().getFullYear()),
+  );
+  const maxCourse = Math.min(9, Math.max(1, Number(map.maxCourse) || 4));
   return {
     institutionName: String(map.institutionName || SETTINGS_DEFAULTS.institutionName).slice(0, 120),
     institutionSubtitle: String(map.institutionSubtitle || '').slice(0, 160),
@@ -532,6 +562,10 @@ function getSettings() {
     smtpPass: String(map.smtpPass || ''),
     smtpFrom: String(map.smtpFrom || '').trim().slice(0, 160),
     smtpFromName: String(map.smtpFromName || '').trim().slice(0, 120),
+    academicYearStart,
+    maxCourse,
+    promotionKeepOldAlias: parseBoolSetting(map.promotionKeepOldAlias, true),
+    promotionCourseUrls,
     ...normalizeTelegramSettings(map),
   };
 }
@@ -668,6 +702,32 @@ function setSettings(patch) {
     telegramMultiMode,
     telegramBindings,
     telegramSchedulePosts,
+    academicYearStart: patch.academicYearStart != null
+      ? Math.min(2100, Math.max(2000, Number(patch.academicYearStart) || current.academicYearStart))
+      : current.academicYearStart,
+    maxCourse: patch.maxCourse != null
+      ? Math.min(9, Math.max(1, Number(patch.maxCourse) || current.maxCourse))
+      : current.maxCourse,
+    promotionKeepOldAlias: patch.promotionKeepOldAlias != null
+      ? parseBoolSetting(patch.promotionKeepOldAlias, current.promotionKeepOldAlias)
+      : current.promotionKeepOldAlias,
+    promotionCourseUrls: (() => {
+      if (patch.promotionCourseUrls == null) return current.promotionCourseUrls;
+      const raw = patch.promotionCourseUrls;
+      const obj = typeof raw === 'string'
+        ? (() => { try { return JSON.parse(raw || '{}'); } catch { return {}; } })()
+        : raw;
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return current.promotionCourseUrls;
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const course = String(k);
+        const url = String(v || '').trim();
+        if (!url) continue;
+        assertSafeScheduleUrls([url]);
+        out[course] = url;
+      }
+      return out;
+    })(),
   };
   for (const key of ['attendanceExcellent', 'attendanceGood', 'attendanceWarn']) {
     if (!Number.isFinite(next[key]) || next[key] < 0 || next[key] > 100) fail(400, 'Пороги посещаемости — числа от 0 до 100');
@@ -710,6 +770,10 @@ function setSettings(patch) {
     upsert.run('telegramMultiMode', next.telegramMultiMode ? '1' : '0');
     upsert.run('telegramBindings', JSON.stringify(next.telegramBindings));
     upsert.run('telegramSchedulePosts', JSON.stringify(next.telegramSchedulePosts));
+    upsert.run('academicYearStart', String(next.academicYearStart));
+    upsert.run('maxCourse', String(next.maxCourse));
+    upsert.run('promotionKeepOldAlias', next.promotionKeepOldAlias ? '1' : '0');
+    upsert.run('promotionCourseUrls', JSON.stringify(next.promotionCourseUrls || {}));
   });
   const telegramConnChanged = (
     current.telegramEnabled !== next.telegramEnabled
@@ -1211,6 +1275,23 @@ function replaceTeacherGroups(teacherId, groupIds) {
   return listTeacherAssignedGroups(teacherId);
 }
 
+function mergeTeacherGroups(teacherId, groupIds) {
+  const ids = [...new Set((groupIds || []).map(parseId).filter(Boolean))];
+  if (!ids.length) return listTeacherAssignedGroups(teacherId);
+  const insert = db.prepare('INSERT OR IGNORE INTO teacher_groups (teacher_id, group_id) VALUES (?, ?)');
+  for (const groupId of ids) {
+    requireGroup(groupId);
+    insert.run(teacherId, groupId);
+  }
+  const teacher = db.prepare('SELECT user_id FROM teachers WHERE id = ?').get(teacherId);
+  if (teacher?.user_id) {
+    const current = listUserGroupLinks(teacher.user_id).map((item) => item.groupId);
+    const merged = [...new Set([...current, ...ids])];
+    replaceUserGroups(teacher.user_id, merged.map((groupId) => ({ groupId, groupRole: 'teacher' })));
+  }
+  return listTeacherAssignedGroups(teacherId);
+}
+
 function syncTeacherGroupsFromSchedule(teacher, { onlyIfEmpty = true } = {}) {
   const teacherId = teacher.id;
   if (onlyIfEmpty) {
@@ -1221,18 +1302,8 @@ function syncTeacherGroupsFromSchedule(teacher, { onlyIfEmpty = true } = {}) {
     .map((item) => item.groupId)
     .filter(Boolean);
   if (!groups.length) return listTeacherAssignedGroups(teacherId);
-  if (onlyIfEmpty) {
-    const insert = db.prepare('INSERT OR IGNORE INTO teacher_groups (teacher_id, group_id) VALUES (?, ?)');
-    for (const groupId of groups) insert.run(teacherId, groupId);
-    const row = db.prepare('SELECT user_id FROM teachers WHERE id = ?').get(teacherId);
-    if (row?.user_id) {
-      const current = listUserGroupLinks(row.user_id).map((item) => item.groupId);
-      const merged = [...new Set([...current, ...groups])];
-      replaceUserGroups(row.user_id, merged.map((groupId) => ({ groupId, groupRole: 'teacher' })));
-    }
-    return listTeacherAssignedGroups(teacherId);
-  }
-  return replaceTeacherGroups(teacherId, groups);
+  // Всегда merge: кураторские группы (ИК-31/9 и т.п.) не затираем сеткой Excel.
+  return mergeTeacherGroups(teacherId, groups);
 }
 
 function sanitizeTeacherRecords() {
@@ -1299,6 +1370,7 @@ function sanitizeScheduleTeacherBleed() {
 
 sanitizeScheduleTeacherBleed();
 sanitizeTeacherRecords();
+discoverTeachersFromSchedule();
 
 function listStudentNotes(studentId) {
   return db.prepare(`
@@ -1319,40 +1391,211 @@ function listStudentNotes(studentId) {
   }));
 }
 
+/** Индекс normKey → Set(groupId) одним проходом по сетке. */
+function buildTeacherScheduleGroupIndex() {
+  const index = new Map();
+  const rows = db.prepare(`
+    SELECT teacher, group_id AS groupId FROM schedule_entries
+    WHERE TRIM(IFNULL(teacher, '')) != '' AND group_id IS NOT NULL
+  `).all();
+  for (const row of rows) {
+    for (const name of extractTeacherNames(row.teacher)) {
+      const key = normalizeTeacherName(name);
+      if (!key) continue;
+      let set = index.get(key);
+      if (!set) {
+        set = new Set();
+        index.set(key, set);
+      }
+      set.add(Number(row.groupId));
+    }
+  }
+  return index;
+}
+
+function groupIdsFromTeacherIndex(index, teacher) {
+  const wants = [];
+  for (const name of teacherMatchNames(teacher)) {
+    const key = normalizeTeacherName(name);
+    if (key) wants.push(key);
+  }
+  if (!wants.length) return [];
+  const ids = new Set();
+  for (const [key, set] of index) {
+    if (wants.some((want) => teacherNormKeysMatch(key, want))) {
+      for (const id of set) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+function upsertDiscoveredTeacherName(rawName, existing, seen, created) {
+  const names = extractTeacherNames(rawName);
+  const touched = [];
+  for (const full of names) {
+    const key = normalizeTeacherName(full);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const short = shortNameFromFull(full);
+    const hit = existing.find((t) => teacherCellMatches(full, t.full_name) || teacherCellMatches(full, t.short_name));
+    if (hit) {
+      const hitShort = shortNameFromFull(hit.full_name);
+      if (short && short.length > String(hit.short_name || '').length) {
+        db.prepare('UPDATE teachers SET full_name = ?, short_name = ? WHERE id = ?')
+          .run(full, short, hit.id);
+        hit.full_name = full;
+        hit.short_name = short;
+      } else if (hitShort && hitShort !== hit.short_name) {
+        db.prepare('UPDATE teachers SET short_name = ? WHERE id = ?').run(hitShort, hit.id);
+        hit.short_name = hitShort;
+      }
+      touched.push(hit);
+      continue;
+    }
+    const info = db.prepare(`
+      INSERT INTO teachers (full_name, short_name, email, photo_path, user_id, created_at)
+      VALUES (?, ?, '', '', NULL, ?)
+    `).run(full, short || key, Date.now());
+    const item = { id: Number(info.lastInsertRowid), fullName: full, shortName: short };
+    const rowTeacher = { id: item.id, full_name: full, short_name: short };
+    existing.push(rowTeacher);
+    created.push(item);
+    touched.push(rowTeacher);
+  }
+  return touched;
+}
+
+function applyScheduleGroupsFromIndex(teachers, index) {
+  for (const teacher of teachers) {
+    const groupIds = groupIdsFromTeacherIndex(index, teacher);
+    if (groupIds.length) mergeTeacherGroups(teacher.id, groupIds);
+  }
+}
+
+/** Быстрый discover по списку ячеек (после импорта одной группы). */
+function discoverTeachersFromTeacherCells(cells = []) {
+  const existing = db.prepare('SELECT id, full_name, short_name FROM teachers').all();
+  const created = [];
+  const seen = new Set();
+  const touched = [];
+  for (const cell of cells) {
+    touched.push(...upsertDiscoveredTeacherName(cell, existing, seen, created));
+  }
+  const index = buildTeacherScheduleGroupIndex();
+  if (touched.length) applyScheduleGroupsFromIndex(touched, index);
+  ensureKnownTeacherCurators(index);
+  return created;
+}
+
 function discoverTeachersFromSchedule() {
   const rows = db.prepare(`
-    SELECT DISTINCT teacher FROM schedule_entries WHERE TRIM(teacher) != ''
+    SELECT DISTINCT teacher FROM schedule_entries WHERE TRIM(IFNULL(teacher, '')) != ''
   `).all();
   const existing = db.prepare('SELECT id, full_name, short_name FROM teachers').all();
   const created = [];
   const seen = new Set();
+  const touched = [];
+
   for (const row of rows) {
-    const names = cleanTeacherName(row.teacher)
-      .split(/[,;]+/)
-      .map((part) => cleanTeacherName(part))
-      .filter(Boolean);
-    for (const full of names) {
-      const key = normalizeTeacherName(full);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      const short = shortNameFromFull(full);
-      const hit = existing.find((t) => teacherCellMatches(full, t.full_name) || teacherCellMatches(full, t.short_name));
-      if (hit) {
-        syncTeacherGroupsFromSchedule(hit, { onlyIfEmpty: true });
+    touched.push(...upsertDiscoveredTeacherName(row.teacher, existing, seen, created));
+  }
+
+  const index = buildTeacherScheduleGroupIndex();
+  applyScheduleGroupsFromIndex(touched.length ? touched : existing, index);
+  ensureKnownTeacherCurators(index);
+  return created;
+}
+
+function findGroupIdByScheduleCode(code) {
+  const group = findGroupByScheduleCode(code);
+  return group?.id || null;
+}
+
+/** Склеивает опечатки вроде «Абель Хафез» → «Абдель Хафез». */
+function mergeFuzzyTeacherDuplicates() {
+  const rows = db.prepare('SELECT * FROM teachers ORDER BY id').all();
+  let merged = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    const keep = rows[i];
+    if (!keep) continue;
+    for (let j = i + 1; j < rows.length; j += 1) {
+      const dup = rows[j];
+      if (!dup) continue;
+      if (!teacherNamesMatch(keep.full_name, dup.full_name)
+        && !teacherNamesMatch(keep.short_name, dup.full_name)
+        && !teacherNamesMatch(keep.full_name, dup.short_name)) {
         continue;
       }
+      // Оставляем более полное / «каноническое» ФИО
+      const keepName = String(keep.full_name || '');
+      const dupName = String(dup.full_name || '');
+      if (dupName.length > keepName.length
+        || (KNOWN_TEACHER_CURATORS.some((c) => teacherCellMatches(dupName, c.name))
+          && !KNOWN_TEACHER_CURATORS.some((c) => teacherCellMatches(keepName, c.name)))) {
+        db.prepare('UPDATE teachers SET full_name = ?, short_name = ? WHERE id = ?')
+          .run(dup.full_name, shortNameFromFull(dup.full_name), keep.id);
+        keep.full_name = dup.full_name;
+        keep.short_name = shortNameFromFull(dup.full_name);
+      }
+      const dupGroups = db.prepare('SELECT group_id FROM teacher_groups WHERE teacher_id = ?').all(dup.id);
+      const insertGroup = db.prepare('INSERT OR IGNORE INTO teacher_groups (teacher_id, group_id) VALUES (?, ?)');
+      for (const item of dupGroups) insertGroup.run(keep.id, item.group_id);
+      db.prepare('DELETE FROM teacher_groups WHERE teacher_id = ?').run(dup.id);
+      if (dup.user_id && !keep.user_id) {
+        db.prepare('UPDATE teachers SET user_id = ? WHERE id = ?').run(dup.user_id, keep.id);
+        db.prepare('UPDATE users SET teacher_id = ? WHERE id = ?').run(keep.id, dup.user_id);
+        keep.user_id = dup.user_id;
+      }
+      if (dup.email && !keep.email) {
+        db.prepare('UPDATE teachers SET email = ? WHERE id = ?').run(dup.email, keep.id);
+      }
+      if (dup.photo_path && !keep.photo_path) {
+        db.prepare('UPDATE teachers SET photo_path = ? WHERE id = ?').run(dup.photo_path, keep.id);
+      }
+      db.prepare('DELETE FROM teachers WHERE id = ?').run(dup.id);
+      rows[j] = null;
+      merged += 1;
+    }
+  }
+  return merged;
+}
+
+/** Закрепляет известных кураторов за группами (даже без своих пар в Excel). */
+function ensureKnownTeacherCurators(scheduleIndex = null) {
+  mergeFuzzyTeacherDuplicates();
+  const index = scheduleIndex || buildTeacherScheduleGroupIndex();
+  const applied = [];
+  for (const entry of KNOWN_TEACHER_CURATORS) {
+    const candidates = [entry.name, ...(entry.aliases || [])];
+    let teacher = db.prepare('SELECT * FROM teachers').all()
+      .find((row) => candidates.some((name) => teacherCellMatches(row.full_name, name)
+        || teacherCellMatches(row.short_name, name)
+        || teacherCellMatches(name, row.full_name)));
+    if (!teacher) {
+      const full = extractTeacherNames(entry.name)[0] || entry.name;
+      const short = shortNameFromFull(full);
       const info = db.prepare(`
         INSERT INTO teachers (full_name, short_name, email, photo_path, user_id, created_at)
         VALUES (?, ?, '', '', NULL, ?)
-      `).run(full, short || key, Date.now());
-      const item = { id: Number(info.lastInsertRowid), fullName: full, shortName: short };
-      const rowTeacher = { id: item.id, full_name: full, short_name: short };
-      existing.push(rowTeacher);
-      syncTeacherGroupsFromSchedule(rowTeacher, { onlyIfEmpty: false });
-      created.push(item);
+      `).run(full, short, Date.now());
+      teacher = db.prepare('SELECT * FROM teachers WHERE id = ?').get(Number(info.lastInsertRowid));
+    } else if (!teacherCellMatches(teacher.full_name, entry.name)) {
+      // Каноническое написание из Excel / кураторского списка
+      const full = extractTeacherNames(entry.name)[0] || entry.name;
+      const short = shortNameFromFull(full);
+      db.prepare('UPDATE teachers SET full_name = ?, short_name = ? WHERE id = ?').run(full, short, teacher.id);
+      teacher.full_name = full;
+      teacher.short_name = short;
     }
+    const fromSchedule = groupIdsFromTeacherIndex(index, teacher);
+    const curated = (entry.groups || [])
+      .map((code) => findGroupIdByScheduleCode(code))
+      .filter(Boolean);
+    const groupIds = [...new Set([...fromSchedule, ...curated])];
+    if (groupIds.length) mergeTeacherGroups(teacher.id, groupIds);
+    applied.push({ teacherId: teacher.id, fullName: teacher.full_name, groupIds });
   }
-  return created;
+  return applied;
 }
 
 function assertExcelEnabled() {
@@ -2026,25 +2269,193 @@ function groupScheduleCodes(group) {
 function mapGroupRow(group) {
   if (!group) return null;
   const aliases = parseScheduleAliases(group.schedule_aliases ?? group.scheduleAliases);
+  const code = group.schedule_code ?? group.scheduleCode ?? null;
+  const parts = parseGroupCodeParts(code || group.name);
+  const studyStartYear = group.study_start_year ?? group.studyStartYear ?? null;
+  const studyEndYear = group.study_end_year ?? group.studyEndYear ?? null;
+  const archived = Number(group.archived || 0) === 1;
   return {
     id: group.id,
     name: group.name,
-    scheduleCode: group.schedule_code ?? group.scheduleCode ?? null,
+    scheduleCode: code,
     scheduleUrl: group.schedule_url ?? group.scheduleUrl ?? '',
     scheduleAliases: aliases,
     scheduleCodes: groupScheduleCodes(group),
     scheduleSyncedAt: group.schedule_synced_at ?? group.scheduleSyncedAt ?? null,
     scheduleSyncError: group.schedule_sync_error ?? group.scheduleSyncError ?? '',
     elderUserId: group.elder_user_id ?? group.elderUserId ?? null,
+    archived,
+    studyStartYear: studyStartYear != null ? Number(studyStartYear) : null,
+    studyEndYear: studyEndYear != null ? Number(studyEndYear) : null,
+    studyYears: studyYearsLabel(studyStartYear, studyEndYear),
+    course: parts?.course || null,
   };
 }
 
 function loadGroupSchedule(id) {
   return db.prepare(`
     SELECT id, name, schedule_code, schedule_url, schedule_aliases,
-      schedule_synced_at, schedule_sync_error, elder_user_id
+      schedule_synced_at, schedule_sync_error, elder_user_id,
+      archived, study_start_year, study_end_year
     FROM groups WHERE id = ?
   `).get(parseId(id));
+}
+
+function resolveCourseSheetUrl(course, settings = getSettings()) {
+  const key = String(course);
+  const mapped = settings.promotionCourseUrls?.[key];
+  if (mapped) return mapped;
+  const urls = settings.scheduleUrls || [];
+  const idx = Number(course) - 1;
+  if (idx >= 0 && idx < urls.length) return urls[idx] || '';
+  return '';
+}
+
+function resolveStudyYearsForArchive(group, settings = getSettings()) {
+  const end = Number(group.study_end_year || group.studyEndYear)
+    || (Number(settings.academicYearStart) + 1);
+  let start = Number(group.study_start_year || group.studyStartYear) || 0;
+  if (!start) {
+    const parts = parseGroupCodeParts(group.schedule_code || group.scheduleCode || group.name);
+    start = cohortYearFromSuffix(parts?.cohort, settings.academicYearStart)
+      || (end - Number(settings.maxCourse || 4));
+  }
+  return { studyStartYear: start, studyEndYear: end };
+}
+
+function buildPromotePreview(user) {
+  const settings = getSettings();
+  const maxCourse = settings.maxCourse || 4;
+  const rows = db.prepare(`
+    SELECT id, name, schedule_code, schedule_url, schedule_aliases,
+      archived, study_start_year, study_end_year
+    FROM groups ORDER BY name COLLATE NOCASE
+  `).all();
+  const byCode = new Map();
+  const byName = new Map();
+  for (const row of rows) {
+    const code = normalizeGroupCode(row.schedule_code || row.name) || row.schedule_code || '';
+    if (code) byCode.set(code, row.id);
+    byName.set(String(row.name).toLowerCase(), row.id);
+  }
+  const allowed = (user?.role === 'admin' || hasPermission(user, 'users.manage'))
+    ? null
+    : new Set((user?.groupIds || []).map(Number));
+  const items = [];
+  for (const row of rows) {
+    if (allowed && !allowed.has(Number(row.id))) continue;
+    if (Number(row.archived) === 1) {
+      items.push({
+        id: row.id,
+        name: row.name,
+        scheduleCode: row.schedule_code,
+        action: 'skip',
+        reason: 'already_archived',
+        studyYears: studyYearsLabel(row.study_start_year, row.study_end_year),
+      });
+      continue;
+    }
+    const parts = parseGroupCodeParts(row.schedule_code || row.name);
+    if (!parts) {
+      items.push({
+        id: row.id,
+        name: row.name,
+        scheduleCode: row.schedule_code,
+        action: 'skip',
+        reason: 'unparsed_code',
+      });
+      continue;
+    }
+    if (parts.course >= maxCourse) {
+      const years = resolveStudyYearsForArchive(row, settings);
+      items.push({
+        id: row.id,
+        name: row.name,
+        scheduleCode: row.schedule_code || parts.code,
+        action: 'archive',
+        course: parts.course,
+        studyStartYear: years.studyStartYear,
+        studyEndYear: years.studyEndYear,
+        studyYears: studyYearsLabel(years.studyStartYear, years.studyEndYear),
+      });
+      continue;
+    }
+    const nextCode = bumpGroupCourse(parts.code, { maxCourse });
+    const nextName = displayGroupName(nextCode);
+    const conflictId = byCode.get(nextCode) || byName.get(String(nextName).toLowerCase());
+    const conflict = conflictId && conflictId !== row.id
+      ? rows.find((g) => g.id === conflictId)?.name || nextCode
+      : null;
+    items.push({
+      id: row.id,
+      name: row.name,
+      scheduleCode: row.schedule_code || parts.code,
+      action: conflict ? 'skip' : 'promote',
+      reason: conflict ? 'name_conflict' : undefined,
+      conflict,
+      course: parts.course,
+      nextCourse: parts.course + 1,
+      nextCode,
+      nextName,
+      nextUrl: resolveCourseSheetUrl(parts.course + 1, settings) || null,
+    });
+  }
+  return {
+    academicYearStart: settings.academicYearStart,
+    academicYearLabel: `${settings.academicYearStart}/${String(settings.academicYearStart + 1).slice(-2)}`,
+    maxCourse,
+    items,
+    promoteCount: items.filter((i) => i.action === 'promote').length,
+    archiveCount: items.filter((i) => i.action === 'archive').length,
+    skipCount: items.filter((i) => i.action === 'skip').length,
+  };
+}
+
+function applyPromoteCourses(user, { dryRun = false } = {}) {
+  const preview = buildPromotePreview(user);
+  if (dryRun) return { dryRun: true, ...preview, applied: [] };
+  const settings = getSettings();
+  const applied = [];
+  const tx = db.transaction(() => {
+    for (const item of preview.items) {
+      if (item.action === 'promote') {
+        const row = loadGroupSchedule(item.id);
+        if (!row || Number(row.archived) === 1) continue;
+        const oldCode = normalizeGroupCode(row.schedule_code || row.name) || row.schedule_code || '';
+        let aliases = parseScheduleAliases(row.schedule_aliases);
+        if (settings.promotionKeepOldAlias && oldCode && oldCode !== item.nextCode) {
+          aliases = [...new Set([oldCode, ...aliases])].filter((c) => c && c !== item.nextCode);
+        } else {
+          aliases = aliases.filter((c) => c && c !== item.nextCode);
+        }
+        const nextUrl = item.nextUrl || row.schedule_url || '';
+        db.prepare(`
+          UPDATE groups
+          SET name = ?, schedule_code = ?, schedule_url = ?, schedule_aliases = ?,
+              schedule_sync_error = ''
+          WHERE id = ?
+        `).run(item.nextName, item.nextCode, nextUrl, JSON.stringify(aliases), item.id);
+        db.prepare(`
+          UPDATE schedule_entries SET group_code = ? WHERE group_id = ?
+        `).run(item.nextCode, item.id);
+        applied.push({ id: item.id, action: 'promote', from: item.name, to: item.nextName });
+      } else if (item.action === 'archive') {
+        db.prepare(`
+          UPDATE groups
+          SET archived = 1, study_start_year = ?, study_end_year = ?, schedule_sync_error = ''
+          WHERE id = ?
+        `).run(item.studyStartYear, item.studyEndYear, item.id);
+        applied.push({
+          id: item.id,
+          action: 'archive',
+          name: item.name,
+          studyYears: item.studyYears,
+        });
+      }
+    }
+  });
+  tx();
+  return { dryRun: false, ...buildPromotePreview(user), applied };
 }
 
 function markGroupScheduleSync(groupId, { error = '', at = Date.now() } = {}) {
@@ -2086,6 +2497,9 @@ function overview(user) {
       g.schedule_synced_at AS scheduleSyncedAt,
       g.schedule_sync_error AS scheduleSyncError,
       g.elder_user_id AS elderUserId,
+      g.archived AS archived,
+      g.study_start_year AS studyStartYear,
+      g.study_end_year AS studyEndYear,
       u.username AS elderUsername,
       u.display_name AS elderDisplayName,
       (SELECT COUNT(*) FROM students s WHERE s.group_id = g.id) AS studentCount,
@@ -2101,6 +2515,7 @@ function overview(user) {
     ].filter(Boolean))];
     const hasCode = !!group.scheduleCode;
     const hasSource = !!(group.scheduleUrl || globalUrls.length);
+    const parts = parseGroupCodeParts(group.scheduleCode || group.name);
     return {
       id: group.id,
       name: group.name,
@@ -2119,6 +2534,11 @@ function overview(user) {
       scheduleCount: group.scheduleCount,
       scheduleBound: hasCode && hasSource,
       scheduleReady: hasCode && hasSource,
+      archived: Number(group.archived) === 1,
+      studyStartYear: group.studyStartYear != null ? Number(group.studyStartYear) : null,
+      studyEndYear: group.studyEndYear != null ? Number(group.studyEndYear) : null,
+      studyYears: studyYearsLabel(group.studyStartYear, group.studyEndYear),
+      course: parts?.course || null,
     };
   });
   if (allowed) groups = groups.filter((group) => allowed.has(Number(group.id)));
@@ -3590,12 +4010,17 @@ async function importScheduleForGroup(groupId, { persistUrl = false, urls } = {}
     }
   }
   markGroupScheduleSync(scopeGroupId, { error: '' });
+  // Лёгкий discover только по свежезагруженным ФИО этой группы (полный — на автосинке/старте).
+  const discovered = discoverTeachersFromTeacherCells(
+    relevant.map((entry) => entry.teacher).filter(Boolean),
+  );
   return {
     saved,
     sources,
     totalParsed: entries.length,
     matchedEntries: relevant.length,
     dedupedSubjects: dedupe.merged,
+    discoveredTeachers: discovered.length,
     groupId: scopeGroupId,
     urls: resolved,
     boundUrl: persistUrl
@@ -3687,6 +4112,7 @@ async function runScheduleAutoSync({ groupId = null, force = false, reason = 'ti
         });
       }
     }
+    const discovered = discoverTeachersFromSchedule();
     const summary = {
       reason,
       at: Date.now(),
@@ -3694,6 +4120,7 @@ async function runScheduleAutoSync({ groupId = null, force = false, reason = 'ti
       ok: results.filter((row) => row.ok).length,
       failed: results.filter((row) => !row.ok).length,
       updated: results.filter((row) => row.changed).length,
+      discoveredTeachers: discovered.length,
       results,
     };
     scheduleSyncState.lastFinishedAt = Date.now();
@@ -4402,10 +4829,34 @@ async function handleApi(req, res, path) {
     assertPermission(user, 'settings.manage');
     if (!telegramBot) fail(500, 'Бот не инициализирован');
     try {
-      const result = await telegramBot.sendTest(
-        `✅ Бот журнала «${getSettings().institutionName}» подключён.\nКоманды: /commands`,
-      );
-      send(res, 200, { ok: true, messageId: result?.message_id || null, status: telegramBot.getStatus() });
+      const current = getSettings();
+      if (!current.telegramBotToken) fail(400, 'Укажите токен бота');
+      if (!current.telegramChatId) fail(400, 'Укажите ID чата');
+      // Раньше «Тест» слал сообщение даже при выключенном боте — команды и меню «/» молчали.
+      // Включаем напрямую в БД, без queueTelegramBotRestart (иначе гонка с restart ниже).
+      if (!current.telegramEnabled) {
+        db.prepare(`
+          INSERT INTO settings (key, value) VALUES ('telegramEnabled', '1')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `).run();
+      }
+      const startResult = await telegramBot.restart();
+      if (!startResult?.ok) {
+        fail(400, `Бот не запустился: ${startResult?.error || startResult?.reason || 'проверьте токен'}`);
+      }
+      const uname = startResult.username ? `@${startResult.username}` : '';
+      const result = await telegramBot.sendTest([
+        `✅ Бот журнала «${getSettings().institutionName}» онлайн${uname ? ` · ${uname}` : ''}.`,
+        'Команды: /commands /pos /today /schedule /groups /chatid /whoami',
+        'Наберите / в поле ввода — появятся подсказки меню.',
+      ].join('\n'));
+      send(res, 200, {
+        ok: true,
+        messageId: result?.message_id || null,
+        started: true,
+        result: startResult,
+        status: telegramBot.getStatus(),
+      });
     } catch (error) {
       fail(400, `Telegram: ${error.message || 'ошибка'}`);
     }
@@ -4415,7 +4866,17 @@ async function handleApi(req, res, path) {
   if (method === 'POST' && path === '/api/settings/telegram-restart') {
     assertPermission(user, 'settings.manage');
     if (!telegramBot) fail(500, 'Бот не инициализирован');
+    const current = getSettings();
+    if (!current.telegramEnabled && current.telegramBotToken) {
+      db.prepare(`
+        INSERT INTO settings (key, value) VALUES ('telegramEnabled', '1')
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run();
+    }
     const result = await telegramBot.restart();
+    if (result?.ok) {
+      try { await telegramBot.ensureCommands?.(); } catch { /* ignore */ }
+    }
     send(res, 200, { ok: true, result, status: telegramBot.getStatus() });
     return;
   }
@@ -5640,6 +6101,28 @@ async function handleApi(req, res, path) {
     return;
   }
 
+  if (method === 'GET' && path === '/api/groups/promote/preview') {
+    assertPermission(user, 'groups.manage');
+    send(res, 200, buildPromotePreview(user));
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/groups/promote') {
+    assertPermission(user, 'groups.manage');
+    const body = await readBody(req);
+    const result = applyPromoteCourses(user, { dryRun: !!body.dryRun });
+    if (!body.dryRun) {
+      writeAudit(user, {
+        action: 'groups.promote',
+        entity: 'group',
+        summary: `Летний перевод · +${result.applied.filter((a) => a.action === 'promote').length} · архив ${result.applied.filter((a) => a.action === 'archive').length}`,
+        details: { applied: result.applied },
+      }, req);
+    }
+    send(res, 200, result);
+    return;
+  }
+
   if (method === 'POST' && path === '/api/groups') {
     assertPermission(user, 'groups.manage');
     const body = await readBody(req);
@@ -5650,11 +6133,23 @@ async function handleApi(req, res, path) {
     const scheduleUrl = body.scheduleUrl != null ? normalizeScheduleUrlInput(body.scheduleUrl) : '';
     const aliases = parseScheduleAliases(body.scheduleAliases)
       .filter((code) => code !== scheduleCode);
+    const studyStartYear = body.studyStartYear != null && String(body.studyStartYear).trim() !== ''
+      ? Math.min(2100, Math.max(1990, Number(body.studyStartYear) || 0)) || null
+      : null;
+    const studyEndYear = body.studyEndYear != null && String(body.studyEndYear).trim() !== ''
+      ? Math.min(2100, Math.max(1990, Number(body.studyEndYear) || 0)) || null
+      : null;
+    const archived = body.archived != null ? (parseBoolSetting(body.archived, false) ? 1 : 0) : 0;
     try {
       const info = db.prepare(`
-        INSERT INTO groups (name, schedule_code, schedule_url, schedule_aliases, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(name, scheduleCode, scheduleUrl, JSON.stringify(aliases), Date.now());
+        INSERT INTO groups (
+          name, schedule_code, schedule_url, schedule_aliases, created_at,
+          archived, study_start_year, study_end_year
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        name, scheduleCode, scheduleUrl, JSON.stringify(aliases), Date.now(),
+        archived, studyStartYear, studyEndYear,
+      );
       const id = Number(info.lastInsertRowid);
       writeAudit(user, {
         action: 'groups.create',
@@ -5715,7 +6210,10 @@ async function handleApi(req, res, path) {
     }
     const body = await readBody(req);
     assertGroupAccess(user, id);
-    if (body.name != null || body.scheduleCode != null || body.scheduleUrl != null || body.scheduleAliases != null) {
+    const touchesSchedule = body.name != null || body.scheduleCode != null || body.scheduleUrl != null
+      || body.scheduleAliases != null || body.course != null || body.archived != null
+      || body.studyStartYear !== undefined || body.studyEndYear !== undefined;
+    if (touchesSchedule) {
       if (!hasPermission(user, 'groups.rename') && !hasPermission(user, 'groups.manage')) {
         fail(403, 'Недостаточно прав для настройки группы');
       }
@@ -5723,8 +6221,10 @@ async function handleApi(req, res, path) {
     if (body.elderUserId !== undefined || body.userId !== undefined) {
       assertPermission(user, 'elders.appoint');
     }
-    const name = body.name != null ? cleanText(body.name, 'название группы') : null;
-    const scheduleCode = body.scheduleCode != null
+    const current = loadGroupSchedule(id);
+    const settings = getSettings();
+    let name = body.name != null ? cleanText(body.name, 'название группы') : null;
+    let scheduleCode = body.scheduleCode != null
       ? (String(body.scheduleCode).trim() ? normalizeGroupCode(body.scheduleCode) || cleanText(body.scheduleCode, 'код расписания', 40) : null)
       : undefined;
     const scheduleUrl = body.scheduleUrl != null
@@ -5733,33 +6233,69 @@ async function handleApi(req, res, path) {
     const aliases = body.scheduleAliases != null
       ? parseScheduleAliases(body.scheduleAliases)
       : undefined;
+
+    if (body.course != null && parseBoolSetting(body.renameToCourse, true)) {
+      const base = scheduleCode !== undefined ? scheduleCode : (current.schedule_code || current.name);
+      const bumped = bumpGroupCourse(base, {
+        course: Number(body.course),
+        maxCourse: settings.maxCourse,
+      });
+      if (bumped) {
+        scheduleCode = bumped;
+        if (name == null || parseBoolSetting(body.renameToCourse, true)) {
+          name = displayGroupName(bumped);
+        }
+      }
+    }
+
+    let archived = body.archived != null ? (parseBoolSetting(body.archived, false) ? 1 : 0) : Number(current.archived || 0);
+    let studyStartYear = body.studyStartYear !== undefined
+      ? (String(body.studyStartYear).trim() === '' ? null : Math.min(2100, Math.max(1990, Number(body.studyStartYear) || 0)) || null)
+      : (current.study_start_year ?? null);
+    let studyEndYear = body.studyEndYear !== undefined
+      ? (String(body.studyEndYear).trim() === '' ? null : Math.min(2100, Math.max(1990, Number(body.studyEndYear) || 0)) || null)
+      : (current.study_end_year ?? null);
+
+    if (body.archived != null && archived === 1 && Number(current.archived || 0) !== 1) {
+      const years = resolveStudyYearsForArchive({
+        ...current,
+        study_start_year: studyStartYear,
+        study_end_year: studyEndYear,
+      }, settings);
+      if (studyStartYear == null) studyStartYear = years.studyStartYear;
+      if (studyEndYear == null) studyEndYear = years.studyEndYear;
+    }
+
     try {
-      const current = loadGroupSchedule(id);
       const nextCode = scheduleCode !== undefined ? scheduleCode : current.schedule_code;
       const nextAliases = aliases !== undefined
         ? aliases.filter((code) => code && code !== nextCode)
         : parseScheduleAliases(current.schedule_aliases).filter((code) => code && code !== nextCode);
-      if (name != null) {
+      const nextName = name != null ? name : current.name;
+      const nextUrl = scheduleUrl !== undefined ? scheduleUrl : (current.schedule_url || '');
+      if (body.course != null && parseBoolSetting(body.renameToCourse, true) && nextCode) {
+        const courseUrl = resolveCourseSheetUrl(parseGroupCodeParts(nextCode)?.course, settings);
         db.prepare(`
-          UPDATE groups SET name = ?, schedule_code = ?, schedule_url = ?, schedule_aliases = ?
+          UPDATE groups SET name = ?, schedule_code = ?, schedule_url = ?, schedule_aliases = ?,
+            archived = ?, study_start_year = ?, study_end_year = ?
           WHERE id = ?
         `).run(
-          name,
-          nextCode,
-          scheduleUrl !== undefined ? scheduleUrl : (current.schedule_url || ''),
-          JSON.stringify(nextAliases),
-          id,
+          nextName, nextCode, courseUrl || nextUrl, JSON.stringify(nextAliases),
+          archived, studyStartYear, studyEndYear, id,
         );
+        db.prepare('UPDATE schedule_entries SET group_code = ? WHERE group_id = ?').run(nextCode, id);
       } else {
         db.prepare(`
-          UPDATE groups SET schedule_code = ?, schedule_url = ?, schedule_aliases = ?
+          UPDATE groups SET name = ?, schedule_code = ?, schedule_url = ?, schedule_aliases = ?,
+            archived = ?, study_start_year = ?, study_end_year = ?
           WHERE id = ?
         `).run(
-          nextCode,
-          scheduleUrl !== undefined ? scheduleUrl : (current.schedule_url || ''),
-          JSON.stringify(nextAliases),
-          id,
+          nextName, nextCode, nextUrl, JSON.stringify(nextAliases),
+          archived, studyStartYear, studyEndYear, id,
         );
+        if (scheduleCode !== undefined && nextCode) {
+          db.prepare('UPDATE schedule_entries SET group_code = ? WHERE group_id = ?').run(nextCode, id);
+        }
       }
     } catch (error) {
       constraintMessage(error, 'Группа с таким названием уже есть');
@@ -5776,6 +6312,7 @@ async function handleApi(req, res, path) {
       details: {
         name: name || undefined,
         scheduleCode: scheduleCode !== undefined ? scheduleCode : undefined,
+        archived: body.archived != null ? !!archived : undefined,
         elderChanged: body.elderUserId !== undefined || body.userId !== undefined,
       },
     }, req);

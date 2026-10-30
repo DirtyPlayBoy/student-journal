@@ -255,10 +255,48 @@ function openModal(html) {
 function closeModal() {
   document.body.classList.remove('modal-open');
   document.getElementById('modal-root').innerHTML = '';
+  closeConfirmDialog();
 }
 
 function modalWrap(inner) {
   return `<div class="backdrop"><div class="sheet">${inner}</div></div>`;
+}
+
+function closeConfirmDialog() {
+  const host = document.getElementById('confirm-root');
+  if (host) host.innerHTML = '';
+}
+
+function openConfirmDialog({
+  title,
+  text,
+  okLabel = 'Да',
+  cancelLabel = 'Нет',
+  okAct = 'close-confirm',
+  cancelAct = 'close-confirm',
+  danger = false,
+  okAttrs = '',
+  extra = '',
+} = {}) {
+  let host = document.getElementById('confirm-root');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'confirm-root';
+    document.body.appendChild(host);
+  }
+  host.innerHTML = `<div class="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <button class="confirm-scrim" type="button" data-act="${cancelAct}" aria-label="Закрыть"></button>
+    <div class="confirm-card">
+      <div class="kicker">Подтверждение</div>
+      <h2 id="confirm-title">${title}</h2>
+      <p class="muted">${text}</p>
+      ${extra}
+      <div class="confirm-actions">
+        <button class="btn btn-ghost btn-block" type="button" data-act="${cancelAct}">${cancelLabel}</button>
+        <button class="btn ${danger ? 'btn-danger' : 'btn-primary'} btn-block" type="button" data-act="${okAct}" ${okAttrs}>${okLabel}</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 async function api(url, options = {}) {
@@ -894,7 +932,7 @@ function homePage() {
     <div class="quick-grid">
       ${canNav('groups') ? `<a class="quick" href="#/groups">${icon.grid}<strong>${groups.length}</strong><span>Группы</span></a>` : ''}
       ${canNav('students') ? `<a class="quick" href="#/students">${icon.user}<strong>${students.length}</strong><span>Ученики</span></a>` : ''}
-      ${canNav('subjects') ? `<a class="quick" href="#/subjects">${icon.book}<strong>${subjects.length}</strong><span>Предметы</span></a>` : ''}
+      ${canNav('subjects') ? `<a class="quick" href="#/subjects">${icon.book}<strong>${clusterSubjectsByName(subjects).length}</strong><span>Предметы</span></a>` : ''}
       ${canNav('stats') ? `<a class="quick" href="#/stats">${icon.chart}<strong>${totals?.rate != null ? Charts.fmtPct(totals.rate) : '—'}</strong><span>Явка</span></a>` : ''}
       ${canNav('calendar') ? `<a class="quick" href="#/calendar">${icon.cal}<strong>${can('attendance.mark') ? 'Отметки' : 'Сетка'}</strong><span>${can('attendance.mark') ? 'Пары' : 'Расписание'}</span></a>` : ''}
       ${canNav('teachers') ? `<a class="quick" href="#/teachers">${icon.users}<strong>Каталог</strong><span>Педагоги</span></a>` : ''}
@@ -913,12 +951,19 @@ function groupCard(group) {
     : (bindOk
       ? `↔ ${group.scheduleCode}${group.scheduleAliases?.length ? ` +${group.scheduleAliases.length}` : ''}`
       : 'Excel не привязан');
-  return `<article class="card row-card group-card diary-card">
+  const years = group.studyYears || '';
+  const badges = [
+    group.archived ? '<span class="group-badge archive">Архив</span>' : '',
+    group.course ? `<span class="group-badge course">${esc(group.course)} курс</span>` : '',
+    years ? `<span class="group-badge years">${esc(years)}</span>` : '',
+  ].filter(Boolean).join('');
+  return `<article class="card row-card group-card diary-card${group.archived ? ' is-archived' : ''}">
     <a class="card-main group-card-main" href="#/group/${group.id}">
       <div class="group-card-mark" aria-hidden="true">${esc((group.name || '?').slice(0, 2).toUpperCase())}</div>
       <div class="group-card-copy">
         <strong>${esc(group.name)}</strong>
-        <span class="muted">${group.elderName ? `Староста ${esc(group.elderName)}` : 'Без старосты'}${bindLabel ? ` · ${esc(bindLabel)}` : ''}</span>
+        <span class="muted group-card-meta">${group.elderName ? `Староста ${esc(group.elderName)}` : 'Без старосты'}${bindLabel ? ` · ${esc(bindLabel)}` : ''}</span>
+        ${badges ? `<div class="group-card-badges">${badges}</div>` : ''}
         <div class="group-card-stats">
           <span><b>${group.studentCount || 0}</b> уч.</span>
           <span><b>${group.subjectCount || 0}</b> предм.</span>
@@ -926,7 +971,7 @@ function groupCard(group) {
         </div>
       </div>
     </a>
-    ${canEdit ? `<button class="icon-btn dark" type="button" data-act="edit-group" data-id="${group.id}" aria-label="Изменить группу">${icon.edit}</button>` : ''}
+    ${canEdit ? `<button class="icon-btn dark group-card-edit" type="button" data-act="edit-group" data-id="${group.id}" aria-label="Настройки группы">${icon.edit}</button>` : ''}
   </article>`;
 }
 
@@ -992,27 +1037,33 @@ function subjectClusterCard(cluster) {
   const href = multi
     ? `#/subjects/hub/${encodeURIComponent(cluster.key)}`
     : `#/subject/${cluster.items[0].id}/attendance`;
-  const groups = multi
-    ? `<div class="subject-group-rows" role="list">
-        ${cluster.items.map((item) => `<div class="subject-group-row" role="listitem">
-          <a href="#/subject/${item.id}/attendance">
-            <strong>${esc(item.groupName)}</strong>
-            <span class="muted">${item.lessonCount || 0} зан. · ${item.scheduleCount || 0} пар${item.creditCount ? ` · ${item.creditCount} зач.` : ''}${item.workCount ? ` · ${item.workCount} оц.` : ''}</span>
-          </a>
-          ${can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${item.id}" aria-label="Изменить в группе ${esc(item.groupName)}">${icon.edit}</button>` : ''}
-        </div>`).join('')}
-      </div>`
-    : `<span class="muted">${esc(cluster.items[0].groupName)}</span>`;
-  return `<article class="card subject-cluster-card${multi ? ' multi' : ' row-card subject-card'}" data-search="${esc(search)}" data-key="${esc(cluster.key)}">
+  if (!multi) {
+    return `<article class="card row-card subject-card subject-cluster-card" data-search="${esc(search)}" data-key="${esc(cluster.key)}" data-group="${cluster.items[0].groupId}">
+      <a class="card-main" href="${href}">
+        <strong>${esc(cluster.name)}</strong>
+        <span class="muted">${esc(cluster.items[0].groupName)}</span>
+        ${subjectCountPills(cluster)}
+      </a>
+      ${can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${cluster.items[0].id}" aria-label="Изменить предмет">${icon.edit}</button>` : ''}
+    </article>`;
+  }
+  return `<article class="card subject-cluster-card multi" data-search="${esc(search)}" data-key="${esc(cluster.key)}">
     <div class="subject-cluster-top">
       <a class="card-main subject-cluster-main" href="${href}">
         <strong>${esc(cluster.name)}</strong>
-        ${multi ? `<span class="muted">${ru(cluster.items.length, 'группа', 'группы', 'групп')} · откройте нужную</span>` : ''}
+        <span class="muted">${ru(cluster.items.length, 'группа', 'группы', 'групп')} · откройте нужную</span>
         ${subjectCountPills(cluster)}
       </a>
-      ${!multi && can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${cluster.items[0].id}" aria-label="Изменить предмет">${icon.edit}</button>` : ''}
     </div>
-    ${groups}
+    <div class="subject-group-rows" role="list">
+      ${cluster.items.map((item) => `<div class="subject-group-row" role="listitem">
+        <a href="#/subject/${item.id}/attendance">
+          <strong>${esc(item.groupName)}</strong>
+          <span class="muted">${item.lessonCount || 0} зан. · ${item.scheduleCount || 0} пар${item.creditCount ? ` · ${item.creditCount} зач.` : ''}${item.workCount ? ` · ${item.workCount} оц.` : ''}</span>
+        </a>
+        ${can('subjects.manage') ? `<button class="icon-btn dark" type="button" data-act="edit-subject" data-id="${item.id}" aria-label="Изменить в группе ${esc(item.groupName)}">${icon.edit}</button>` : ''}
+      </div>`).join('')}
+    </div>
   </article>`;
 }
 
@@ -1540,13 +1591,13 @@ function permissionCatalog() {
 function telegramStatusHtml(settings) {
   const st = settings.telegramStatus || {};
   if (!settings.telegramEnabled) {
-    return '<p class="muted tight">Бот выключен.</p>';
+    return `<p class="muted tight">Бот выключен. Включите галочку выше и сохраните — или нажмите «Тест в чат» (включит и запустит сам).${settings.telegramBotTokenSet ? '' : ' Сначала укажите токен.'}</p>`;
   }
   const state = st.running
     ? `онлайн${st.username ? ` · @${esc(st.username)}` : ''}`
     : 'офлайн';
   const err = st.lastError ? `<span class="warn-inline"> · ${esc(st.lastError)}</span>` : '';
-  return `<p class="muted tight">Статус: <b>${state}</b>${err}${st.scheduleJobs ? ` · автопостов: ${st.scheduleJobs}` : ''}</p>`;
+  return `<p class="muted tight">Статус: <b>${state}</b>${err}${st.scheduleJobs ? ` · автопостов: ${st.scheduleJobs}` : ''}<br>В Telegram наберите <b>/</b> — должны быть подсказки: /commands, /pos, /today…</p>`;
 }
 
 function telegramBindingsEditor(settings) {
@@ -1647,6 +1698,33 @@ function settingsPage() {
         </label>
         <p class="muted tight">Удобнее задать ссылку прямо в карточке группы — тогда привязка «группа ↔ столбец» нагляднее.</p>
         <a class="btn btn-ghost btn-block" href="#/groups">Открыть группы и привязки</a>
+      </div>
+      <div class="section-head tight"><h3>Учебный год и курсы</h3></div>
+      <p class="muted tight">Летний перевод: ИК 31/9 → ИК 41/9; выпускной курс уходит в архив с годами обучения.</p>
+      <div class="settings-grid-2">
+        <label class="field"><span>Учебный год (начало)</span>
+          <input name="academicYearStart" type="number" min="2000" max="2100" step="1" value="${esc(settings.academicYearStart ?? new Date().getFullYear())}">
+        </label>
+        <label class="field"><span>Макс. курс</span>
+          <input name="maxCourse" type="number" min="1" max="9" step="1" value="${esc(settings.maxCourse ?? 4)}">
+        </label>
+      </div>
+      <p class="muted tight">Сейчас: <b>${esc(settings.academicYearStart || new Date().getFullYear())}/${String((Number(settings.academicYearStart) || new Date().getFullYear()) + 1).slice(-2)}</b></p>
+      <label class="check-row">
+        <input type="checkbox" name="promotionKeepOldAlias" value="1" ${settings.promotionKeepOldAlias !== false ? 'checked' : ''}>
+        <span><strong>Оставлять старый код Excel как alias</strong><small>После перевода ИК-31/9 останется в aliases, пока таблица не обновится.</small></span>
+      </label>
+      <div class="course-url-grid">
+        ${[1, 2, 3, 4].map((course) => {
+          const fromMap = settings.promotionCourseUrls?.[String(course)] || '';
+          const fallback = (settings.scheduleUrls || [])[course - 1] || '';
+          return `<label class="field"><span>Excel · ${course} курс</span>
+            <input name="courseUrl${course}" maxlength="500" value="${esc(fromMap)}" placeholder="${esc(fallback || 'https://docs.google.com/…')}">
+          </label>`;
+        }).join('')}
+      </div>
+      <div class="row-actions toolbar-row" style="margin-bottom:12px">
+        <button class="btn btn-primary" type="button" data-act="promote-preview">Летний перевод курса</button>
       </div>
       <div class="section-head tight"><h3>SMTP · письма с доступом</h3></div>
       <label class="check-row">
@@ -2192,9 +2270,10 @@ function shiftDays(iso, delta) {
 }
 
 function calPairChip(pair) {
-  const time = pair.timeStart ? esc(pair.timeStart) : `${pair.pairNum}`;
+  const time = pair.timeStart ? esc(pair.timeStart) : `№${pair.pairNum}`;
   const title = esc(pair.subjectName || '');
-  return `<span class="cal-chip${pair.marked ? ' marked' : ''}" style="--chip:${colorOf(pair.subjectName)}" title="${title}${pair.room ? ` · ${esc(pair.room)}` : ''}">
+  const tip = [pair.subjectName, pair.room, pair.teacher, pair.lessonKind].filter(Boolean).map(esc).join(' · ');
+  return `<span class="cal-chip${pair.marked ? ' marked' : ''}" style="--chip:${colorOf(pair.subjectName)}" title="${tip}">
     <b>${time}</b><em>${title}</em>
   </span>`;
 }
@@ -2219,10 +2298,9 @@ function calendarMonthGridHtml(data, groupId) {
       day.weekday === 7 ? 'is-sun' : '',
     ].filter(Boolean).join(' ');
     const weekClass = day.weekType === 'lower' ? 'week-lower' : day.weekType === 'upper' ? 'week-upper' : '';
-    const chips = pairs.slice(0, 4).map(calPairChip).join('');
-    const more = pairs.length > 4 ? `<span class="cal-more">+${pairs.length - 4}</span>` : '';
+    const chips = pairs.map(calPairChip).join('');
     const body = day.pairCount
-      ? `<div class="cal-chip-stack">${chips}${more}</div>
+      ? `<div class="cal-chip-stack">${chips}</div>
          <div class="cal-meta">${canMark ? (day.markedPairs ? `отмечено ${day.markedPairs}/${day.pairCount}` : 'не отмечено') : ru(day.pairCount, 'пара', 'пары', 'пар')}</div>`
       : '<div class="cal-meta">выходной</div>';
     cells.push(`<a class="${classes}" href="#/calendar/${groupId}/${day.date}">
@@ -2326,7 +2404,7 @@ function calendarPage() {
   const body = view === 'week' ? calendarWeekTableHtml(data, groupId) : calendarMonthGridHtml(data, groupId);
   return `${pairsHub(groupId, 'calendar')}
     <div class="cal-toolbar">
-      ${chips ? `<div class="chips">${chips}</div>` : `<div class="kicker diary-week-kicker">${esc(data.group?.name || groups.find((g) => g.id === groupId)?.name || '')} · текущая неделя</div>`}
+      ${chips ? `<div class="chips scroll-chips cal-group-chips" aria-label="Группы">${chips}</div>` : `<div class="kicker diary-week-kicker">${esc(data.group?.name || groups.find((g) => g.id === groupId)?.name || '')} · текущая неделя</div>`}
       ${isStudentRole() ? '' : `<div class="cal-view-switch" role="tablist" aria-label="Вид календаря">
         <button class="chip${view === 'month' ? ' on' : ''}" type="button" data-act="cal-view" data-view="month">Месяц</button>
         <button class="chip${view === 'week' ? ' on' : ''}" type="button" data-act="cal-view" data-view="week">Неделя · таблица</button>
@@ -2429,22 +2507,59 @@ function pairFilterChips(pair, day) {
 
 function pairConfirmBarHtml() {
   const conf = S.pairConfirm;
-  if (!conf) return '';
+  if (!conf || conf.fill === 'clear') return '';
   const text = conf.fill === 'absent-open'
     ? 'Пустых отметить «нет»? Уже отмеченные не изменятся.'
-    : conf.fill === 'clear'
-      ? 'Очистить весь список явки по этой паре?'
-      : 'Отметить всю группу «здесь»?';
-  const ok = conf.fill === 'absent-open'
-    ? 'Да, пустых → нет'
-    : conf.fill === 'clear'
-      ? 'Да, очистить'
-      : 'Да, все здесь';
-  return `<div class="pair-confirm-bar${conf.fill === 'clear' ? ' pair-clear-confirm' : ''}" role="status">
+    : 'Отметить всю группу «здесь»?';
+  const ok = conf.fill === 'absent-open' ? 'Да, пустых → нет' : 'Да, все здесь';
+  return `<div class="pair-confirm-bar" role="status">
     <p>${text}</p>
     <button class="btn btn-ghost btn-small" type="button" data-act="pair-fill-cancel">Отмена</button>
-    <button class="btn ${conf.fill === 'clear' ? 'btn-danger' : 'btn-primary'} btn-small" type="button" data-act="confirm-pair-fill">${ok}</button>
+    <button class="btn btn-primary btn-small" type="button" data-act="confirm-pair-fill">${ok}</button>
   </div>`;
+}
+
+function askClearPairList(pair, day, { groupId, date, scheduleEntryId } = {}) {
+  const num = pair?.pairNum || '';
+  const name = pair?.subjectName ? shortSubjectName(pair.subjectName, 28) : '';
+  S.pairCopyConfirm = null;
+  S.pairConfirm = {
+    groupId: Number(groupId || day?.group?.id),
+    date: date || day?.date,
+    scheduleEntryId: Number(scheduleEntryId || pair?.scheduleEntryId),
+    fill: 'clear',
+  };
+  openConfirmDialog({
+    title: 'Очистить список?',
+    text: num
+      ? `Снять все отметки с ${num}-й пары${name ? ` «${esc(name)}»` : ''}? Это действие можно будет повторить заново.`
+      : 'Снять все отметки явки по этой паре?',
+    okLabel: 'Да, очистить',
+    cancelLabel: 'Нет',
+    okAct: 'confirm-pair-fill',
+    cancelAct: 'pair-fill-cancel',
+    danger: true,
+  });
+}
+
+function askCopyPairAttendance(payload) {
+  S.pairConfirm = null;
+  S.pairCopyConfirm = payload;
+  const fromName = payload.fromSubject ? ` «${esc(shortSubjectName(payload.fromSubject, 24))}»` : '';
+  const toName = payload.toSubject ? ` «${esc(shortSubjectName(payload.toSubject, 24))}»` : '';
+  openConfirmDialog({
+    title: 'Перенести отметки?',
+    text: `Перенести отметки с ${payload.fromPairNum}-й пары${fromName} на ${payload.toPairNum}-ю${toName}?`,
+    okLabel: 'Да, перенести',
+    cancelLabel: 'Нет',
+    okAct: 'confirm-pair-copy',
+    cancelAct: 'pair-copy-cancel',
+    okAttrs: 'data-mode="replace"',
+    extra: `<div class="confirm-extra">
+      <button class="btn btn-ghost btn-small" type="button" data-act="confirm-pair-copy" data-mode="fill-empty">Только пустые</button>
+      <button class="btn btn-ghost btn-small" type="button" data-act="confirm-pair-copy" data-mode="here-only">Только «здесь»</button>
+    </div>`,
+  });
 }
 
 function pairHasMarks(pair) {
@@ -2487,21 +2602,7 @@ function pairXferMeta(pair) {
 }
 
 function pairCopyConfirmBarHtml() {
-  const conf = S.pairCopyConfirm;
-  if (!conf) return '';
-  const fromLabel = `${conf.fromPairNum}-й`;
-  const toLabel = `${conf.toPairNum}-й`;
-  const fromName = conf.fromSubject ? ` «${esc(shortSubjectName(conf.fromSubject, 22))}»` : '';
-  return `<div class="pair-confirm-bar pair-copy-confirm" role="status">
-    <p>Список с ${fromLabel}${fromName} → на ${toLabel}. Повторный клик по той же кнопке снимет копию.</p>
-    <div class="pair-copy-modes">
-      <button class="btn btn-ghost btn-small" type="button" data-act="pair-copy-cancel">Отмена</button>
-      <button class="btn btn-ghost btn-small" type="button" data-act="confirm-pair-copy" data-mode="fill-empty">Только пустые</button>
-      <button class="btn btn-ghost btn-small" type="button" data-act="confirm-pair-copy" data-mode="here-only">Только здесь</button>
-      <button class="btn btn-ghost btn-small" type="button" data-act="confirm-pair-copy" data-mode="away-only">Только нет</button>
-      <button class="btn btn-primary btn-small" type="button" data-act="confirm-pair-copy" data-mode="replace">Заменить всё</button>
-    </div>
-  </div>`;
+  return '';
 }
 
 function pairTransferSources(day, targetPair) {
@@ -2534,8 +2635,8 @@ function pairTransferTargets(day, sourcePair) {
 }
 
 function pairTransferPanelHtml(pair, day, { compact = false } = {}) {
-  const sources = pairTransferSources(day, pair);
-  const targets = pairTransferTargets(day, pair);
+  const sources = pairTransferSources(day, pair).slice(0, compact ? 3 : 6);
+  const targets = pairTransferTargets(day, pair).slice(0, compact ? 3 : 6);
   const canClear = pairHasMarks(pair);
   if (!sources.length && !targets.length && !canClear) return '';
   const attrs = `data-group="${day.group.id}" data-date="${day.date}"`;
@@ -2549,17 +2650,16 @@ function pairTransferPanelHtml(pair, day, { compact = false } = {}) {
       && Number(last.toScheduleEntryId) === Number(pair.scheduleEntryId);
     const hot = index === 0 && Number(src.scheduleEntryId) === Number(nearestSourceId);
     const title = same
-      ? `Список уже как на ${src.pairNum}-й — нажмите ещё раз, чтобы очистить`
-      : `Взять список с ${src.pairNum}-й · ${src.subjectName} · на паре ${meta.detail}`;
+      ? `Список как на ${src.pairNum}-й — нажмите, чтобы очистить эту пару`
+      : `Взять отметки с ${src.pairNum}-й пары`;
     return `
-    <button class="pair-xfer-btn from rich${same ? ' same' : ''}${linked ? ' linked' : ''}${hot && !same ? ' hot' : ''}" type="button" data-act="copy-pair-attendance"
+    <button class="pair-xfer-btn from${same ? ' same' : ''}${linked ? ' linked' : ''}${hot && !same ? ' hot' : ''}" type="button" data-act="copy-pair-attendance"
       ${attrs}
       data-from="${src.scheduleEntryId}" data-to="${pair.scheduleEntryId}"
       data-from-num="${src.pairNum}" data-to-num="${pair.pairNum}"
       title="${esc(title)}">
-      <span class="pair-xfer-main"><span class="pair-xfer-arrow">${same ? '✕' : '↓'}</span>${src.pairNum}</span>
-      <span class="pair-xfer-meta">${same ? 'сброс' : esc(meta.count)}</span>
-      ${compact ? '' : `<span class="pair-xfer-sub">${esc(shortSubjectName(src.subjectName, 11))}</span>`}
+      <span class="pair-xfer-ico">${same ? '✕' : '↓'}</span>
+      <span class="pair-xfer-txt"><b>${src.pairNum}</b><small>${same ? 'сброс' : meta.count}</small></span>
     </button>`;
   }).join('');
   const toBtns = targets.map((dst) => {
@@ -2569,44 +2669,37 @@ function pairTransferPanelHtml(pair, day, { compact = false } = {}) {
       && Number(last.fromScheduleEntryId) === Number(pair.scheduleEntryId)
       && Number(last.toScheduleEntryId) === Number(dst.scheduleEntryId);
     const title = same
-      ? `На ${dst.pairNum}-й уже такой же список — нажмите ещё раз, чтобы очистить`
-      : empty
-        ? `Перенести список на ${dst.pairNum}-ю · ${dst.subjectName} (пусто)`
-        : `Перенести список на ${dst.pairNum}-ю · ${dst.subjectName} · уже ${dst.stats?.marked || 0}`;
+      ? `На ${dst.pairNum}-й уже такой же список — очистить`
+      : `Перенести отметки на ${dst.pairNum}-ю пару`;
     return `
-    <button class="pair-xfer-btn to rich${same ? ' same' : ''}${linked ? ' linked' : ''}${empty ? ' empty-target' : ''}" type="button" data-act="copy-pair-attendance"
+    <button class="pair-xfer-btn to${same ? ' same' : ''}${linked ? ' linked' : ''}${empty ? ' empty-target' : ''}" type="button" data-act="copy-pair-attendance"
       ${attrs}
       data-from="${pair.scheduleEntryId}" data-to="${dst.scheduleEntryId}"
       data-from-num="${pair.pairNum}" data-to-num="${dst.pairNum}"
       title="${esc(title)}">
-      <span class="pair-xfer-main">${dst.pairNum}<span class="pair-xfer-arrow">${same ? '✕' : '→'}</span></span>
-      <span class="pair-xfer-meta">${same ? 'сброс' : empty ? 'пусто' : String(dst.stats?.marked || 0)}</span>
+      <span class="pair-xfer-txt"><b>${dst.pairNum}</b><small>${same ? 'сброс' : empty ? 'пусто' : String(dst.stats?.marked || 0)}</small></span>
+      <span class="pair-xfer-ico">${same ? '✕' : '→'}</span>
     </button>`;
   }).join('');
   return `<div class="pair-xfer ${compact ? 'compact' : ''}">
     ${sources.length ? `<div class="pair-xfer-row">
-      <span class="pair-xfer-label">Взять с</span>
+      <span class="pair-xfer-label">С пары</span>
       <div class="pair-xfer-btns">${fromBtns}</div>
     </div>` : ''}
     ${targets.length ? `<div class="pair-xfer-row">
       <span class="pair-xfer-label">На пару</span>
       <div class="pair-xfer-btns">${toBtns}</div>
     </div>` : ''}
-    ${canClear ? `<div class="pair-xfer-row pair-xfer-clear-row">
-      <button class="pair-xfer-clear" type="button" data-act="pair-fill-clear"
-        ${attrs} data-entry="${pair.scheduleEntryId}"
-        title="Очистить весь список явки по этой паре">Очистить список</button>
-    </div>` : ''}
+    ${canClear ? `<button class="pair-xfer-clear" type="button" data-act="pair-fill-clear"
+      ${attrs} data-entry="${pair.scheduleEntryId}"
+      title="Очистить весь список явки">Очистить список</button>` : ''}
   </div>`;
 }
 
 function pairMiniMeter(pair) {
   const total = pair.totalStudents || 0;
-  if (!total) return '';
   const marked = pair.stats?.marked || 0;
-  if (!marked) {
-    return `<div class="pair-meter empty" aria-hidden="true"><span></span></div>`;
-  }
+  if (!total || !marked) return '';
   const present = ((pair.stats?.present || 0) / total) * 100;
   const late = ((pair.stats?.late || 0) / total) * 100;
   const excused = ((pair.stats?.excused || 0) / total) * 100;
@@ -2697,6 +2790,14 @@ function refreshPairPeopleList(pair, day, { scrollTop } = {}) {
     ? pairRosterPeopleHtml(pair, day)
     : '<div class="empty"><h2>Нет учеников</h2><p>Добавьте учеников в группу.</p></div>';
   updatePairModalChrome(pair, day);
+  const xfer = document.querySelector('.pair-modal .pair-xfer');
+  const nextXfer = pairTransferPanelHtml(pair, day);
+  if (xfer && nextXfer) xfer.outerHTML = nextXfer;
+  else if (xfer && !nextXfer) xfer.remove();
+  else if (!xfer && nextXfer) {
+    const host = document.getElementById('pair-confirm-host');
+    if (host) host.insertAdjacentHTML('beforebegin', nextXfer);
+  }
   applyPairPeopleVisibility();
   list.scrollTop = keep;
 }
@@ -2822,17 +2923,17 @@ function calendarDayPage() {
         </article>`;
       }
       const status = pair.stats.marked
-        ? `<div class="pair-stat level-text-${level}">на паре ${pair.here}/${pair.totalStudents}${pair.stats.absent ? ` · нет ${pair.stats.absent}` : ''}</div>`
-        : '<div class="pair-stat pair-stat-open">нажмите, чтобы отметить</div>';
+        ? `<span class="pair-stat-chip level-text-${level}">на паре ${pair.here}/${pair.totalStudents}${pair.stats.absent ? ` · нет ${pair.stats.absent}` : ''}</span>`
+        : '<span class="pair-stat-chip open">отметить</span>';
       const xfer = pairTransferPanelHtml(pair, day, { compact: true });
       return `<article class="pair-card ${on ? 'on' : ''} ${pair.stats.marked ? 'has-marks' : 'needs-marks'} level-border-${level}" style="--pair-accent:${colorOf(pair.subjectName)}; --rise-delay:${delay}ms">
         <button class="pair-card-main" type="button" data-act="open-pair-roster" data-entry="${pair.scheduleEntryId}" data-group="${day.group.id}" data-date="${day.date}">
           <div class="pair-num">${pair.pairNum}<small>пара</small></div>
           <div class="pair-body">
             <strong>${esc(pair.subjectName)}</strong>
-            <div class="muted">${esc(meta)}</div>
+            <div class="muted pair-meta">${esc(meta)}</div>
             ${pairMiniMeter(pair)}
-            ${status}
+            <div class="pair-stat-row">${status}</div>
           </div>
           <span class="pair-open" aria-hidden="true">→</span>
         </button>
@@ -2853,7 +2954,7 @@ function calendarDayPage() {
     </div>
     ${canMark ? dayAttendanceStrip(day) : ''}
     ${canMark
-      ? '<p class="hint day-hint">Откройте пару для переклички. <b>Взять с</b> копирует явку; повторный клик по той же кнопке очищает. Статус ученика тоже снимается повторным нажатием.</p>'
+      ? '<p class="hint day-hint">Откройте пару для переклички. Кнопки <b>С пары</b> / <b>На пару</b> переносят отметки с подтверждением.</p>'
       : '<p class="hint">Расписание группы на выбранный день.</p>'}
     ${copyHost ? `<div id="day-copy-host">${copyHost}</div>` : ''}
     <div class="pair-list">${pairCards}</div>
@@ -2861,24 +2962,35 @@ function calendarDayPage() {
 }
 
 function groupsPage() {
-  const groups = S.overview.groups;
+  const all = S.overview.groups || [];
+  const tab = S.groupsTab === 'archive' ? 'archive' : 'active';
+  const groups = all.filter((g) => (tab === 'archive' ? g.archived : !g.archived));
+  const activeCount = all.filter((g) => !g.archived).length;
+  const archiveCount = all.filter((g) => g.archived).length;
   const totalStudents = groups.reduce((sum, group) => sum + (group.studentCount || 0), 0);
-  const hint = excelOn()
-    ? 'Привязка Excel: группа → ссылка → код столбца → подтянуть пары.'
-    : 'Excel выключен — правьте сетку вручную в разделе «Правка».';
+  const excelBound = groups.filter((g) => g.scheduleBound || g.scheduleCode).length;
+  const hint = tab === 'archive'
+    ? 'Архив выпускных групп. Годы обучения указаны на карточке.'
+    : (excelOn()
+      ? 'Привязка Excel: группа → ссылка → код столбца → подтянуть пары.'
+      : 'Excel выключен — правьте сетку вручную в разделе «Правка».');
   return `<section class="page-hero groups-hero card pad">
       <div class="kicker">Группы журнала</div>
       <h2>${ru(groups.length, 'группа', 'группы', 'групп')}</h2>
-      <p class="muted">${ru(totalStudents, 'ученик', 'ученика', 'учеников')} · ${hint}</p>
-      <div class="mini-kpis diary-kpis">
-        <div><b>${groups.length}</b><span>групп</span></div>
-        <div><b>${totalStudents}</b><span>учеников</span></div>
-        <div><b>${groups.filter((g) => g.scheduleBound || g.scheduleCode).length}</b><span>с Excel</span></div>
+      <p class="muted groups-hero-lead">${ru(totalStudents, 'ученик', 'ученика', 'учеников')} · ${hint}</p>
+      <div class="mini-kpis diary-kpis kpis-3">
+        <div><b>${activeCount}</b><span>активных</span></div>
+        <div><b>${archiveCount}</b><span>в архиве</span></div>
+        <div><b>${excelBound}</b><span>с Excel</span></div>
       </div>
     </section>
-    ${excelOn() ? `<div class="banner soft">Группа журнала = столбец в Excel. Название может отличаться — важен код (например А-101).</div>` : ''}
-    ${listsExportToolbar()}
-    ${groups.length ? `<div class="list group-list">${groups.map(groupCard).join('')}</div>` : '<div class="empty"><h2>Групп нет</h2><p>Создайте первую группу вашего заведения.</p></div>'}`;
+    <div class="tabs hub-tabs groups-tabs" role="tablist" aria-label="Список групп">
+      <button class="chip${tab === 'active' ? ' on' : ''}" type="button" data-act="groups-tab" data-tab="active">Активные · ${activeCount}</button>
+      <button class="chip${tab === 'archive' ? ' on' : ''}" type="button" data-act="groups-tab" data-tab="archive">Архив · ${archiveCount}</button>
+    </div>
+    ${excelOn() && tab === 'active' ? `<div class="banner soft">Группа журнала = столбец в Excel. Название может отличаться — важен код (например А-101).</div>` : ''}
+    ${tab === 'active' ? listsExportToolbar() : ''}
+    ${groups.length ? `<div class="list group-list">${groups.map(groupCard).join('')}</div>` : `<div class="empty"><h2>${tab === 'archive' ? 'Архив пуст' : 'Групп нет'}</h2><p>${tab === 'archive' ? 'После летнего перевода выпускные группы появятся здесь.' : 'Создайте первую группу вашего заведения.'}</p></div>`}`;
 }
 
 function groupPage() {
@@ -2895,14 +3007,14 @@ function groupPage() {
   return `<section class="page-hero group-hero card pad">
       <div class="group-hero-top">
         <div>
-          <div class="kicker">Группа${group.elderName ? ` · староста ${esc(group.elderName)}` : ''}</div>
+          <div class="kicker">Группа${group.elderName ? ` · староста ${esc(group.elderName)}` : ''}${group.archived ? ' · архив' : ''}${group.course ? ` · ${group.course} курс` : ''}</div>
           <h2>${esc(group.name)}</h2>
-          <p class="muted">${esc(excelMeta)}${group.scheduleSyncedAt ? ` · сверка ${esc(syncAgoLabel(group.scheduleSyncedAt))}` : ''}</p>
+          <p class="muted">${esc(excelMeta)}${group.studyYears ? ` · ${esc(group.studyYears)}` : ''}${group.scheduleSyncedAt ? ` · сверка ${esc(syncAgoLabel(group.scheduleSyncedAt))}` : ''}</p>
         </div>
         <div class="intro-actions">
           <a class="btn btn-primary btn-small" href="#/calendar/${group.id}">Расписание</a>
           ${can('stats.view') ? `<a class="btn btn-ghost btn-small" href="#/stats/group/${group.id}">Статистика</a>` : ''}
-          ${canEditGroup ? `<button class="btn btn-ghost btn-small" type="button" data-act="edit-group" data-id="${group.id}">${excelOn() ? 'Привязка Excel' : 'Изменить'}</button>` : ''}
+          ${canEditGroup ? `<button class="btn btn-ghost btn-small" type="button" data-act="edit-group" data-id="${group.id}">Настройки</button>` : ''}
         </div>
       </div>
       <div class="mini-kpis diary-kpis">
@@ -3458,6 +3570,35 @@ function teacherScheduleGrid(entries, weekTypeToday) {
   </div>`;
 }
 
+function teacherGroupLinks(assigned = [], fromSchedule = []) {
+  const byId = new Map();
+  for (const g of [...fromSchedule, ...assigned]) {
+    if (!g?.groupId) continue;
+    const prev = byId.get(Number(g.groupId)) || { groupId: g.groupId, name: g.name, pairs: 0 };
+    prev.name = g.name || prev.name;
+    if (g.pairs) prev.pairs = g.pairs;
+    byId.set(Number(g.groupId), prev);
+  }
+  return [...byId.values()].sort((a, b) => String(a.name).localeCompare(String(b.name), 'ru'));
+}
+
+function teacherGroupsPanel(groups, { canMark = false } = {}) {
+  if (!groups.length) {
+    return '<p class="muted">Группы пока не найдены — проверьте ФИО как в Excel или назначьте вручную.</p>';
+  }
+  return `<div class="list teacher-group-actions">${groups.map((g) => `
+    <article class="card row-card">
+      <div class="card-main">
+        <strong>${esc(g.name)}</strong>
+        <span class="muted">${g.pairs ? `${g.pairs} пар в сетке педагога` : 'закреплена · полное расписание группы'}</span>
+      </div>
+      <div class="row-actions">
+        <a class="btn btn-ghost btn-small" href="#/calendar/${g.groupId}">Расписание</a>
+        ${canMark ? `<a class="btn btn-primary btn-small" href="#/calendar/${g.groupId}">Отмечать</a>` : ''}
+      </div>
+    </article>`).join('')}</div>`;
+}
+
 function teacherPage() {
   const data = S.teacherDetail;
   if (!data?.teacher) return missingHtml();
@@ -3465,16 +3606,18 @@ function teacherPage() {
   const result = S.accessResult;
   const assigned = data.groups || [];
   const fromSchedule = data.scheduleGroups || [];
+  const groupLinks = teacherGroupLinks(assigned, fromSchedule);
   const assignedIds = new Set(assigned.map((g) => Number(g.groupId)));
   const allGroups = data.allGroups || [];
   const scheduleCount = (data.schedule || []).length;
+  const canMark = can('attendance.mark') || can('teachers.manage');
   return `<section class="student-hero diary-profile card pad">
       <div class="student-hero-top">
         ${avatarHtml(teacher.fullName, teacher.photoUrl, 'xl')}
         <div>
           <div class="kicker">Педагог${teacher.hasAccess ? ' · доступ есть' : ''}</div>
           <h2>${esc(teacher.fullName)}</h2>
-          <p class="muted">${esc(teacher.shortName || '')}${teacher.email ? ` · ${esc(teacher.email)}` : ''} · ${scheduleCount} пар · ${assigned.length || fromSchedule.length} групп</p>
+          <p class="muted">${esc(teacher.shortName || '')}${teacher.email ? ` · ${esc(teacher.email)}` : ''} · ${scheduleCount} пар · ${groupLinks.length} групп</p>
           ${can('teachers.manage') ? `<div class="photo-actions">
             <label class="btn btn-ghost btn-small photo-upload-btn">Фото
               <input type="file" accept="image/jpeg,image/png,image/webp" hidden data-act-change="upload-teacher-photo" data-id="${teacher.id}">
@@ -3485,25 +3628,22 @@ function teacherPage() {
     </section>
     <section class="card pad teacher-groups-card">
       <div class="section-head"><h2>Группы педагога</h2></div>
-      <p class="hint">Из расписания подставляются автоматически. Можно назначить или убрать вручную.</p>
-      ${(assigned.length || fromSchedule.length) ? `<div class="teacher-group-chips">
-        ${(assigned.length ? assigned : fromSchedule).map((g) => `
-          <a class="chip on" href="#/calendar/${g.groupId}">${esc(g.name)}${g.pairs ? ` · ${g.pairs}` : ''}</a>`).join('')}
-      </div>` : '<p class="muted">Группы пока не найдены — проверьте ФИО как в Excel.</p>'}
+      <p class="hint">Пары из Excel + закреплённые группы (куратор). У каждой группы — полное расписание и отметки.</p>
+      ${teacherGroupsPanel(groupLinks, { canMark })}
       ${can('teachers.manage') && allGroups.length ? `<form data-form="save-teacher-groups" data-id="${teacher.id}" class="teacher-groups-form">
         <div class="group-check-grid">${allGroups.map((g) => `
           <label class="check-row"><input type="checkbox" name="groupIds" value="${g.id}" ${assignedIds.has(Number(g.id)) ? 'checked' : ''}><span>${esc(g.name)}</span></label>`).join('')}
         </div>
         <div class="row-actions" style="margin-top:12px">
           <button class="btn btn-primary" type="submit">Сохранить группы</button>
-          <button class="btn btn-ghost" type="button" data-act="sync-teacher-groups" data-id="${teacher.id}">Из расписания</button>
+          <button class="btn btn-ghost" type="button" data-act="sync-teacher-groups" data-id="${teacher.id}">Дополнить из расписания</button>
         </div>
       </form>` : ''}
     </section>
     ${can('users.manage') ? `<section class="card pad access-card">
       <div class="kicker">Доступ преподавателя</div>
       <form data-form="grant-teacher-access" data-id="${teacher.id}">
-        <label class="field"><span>Логин</span><input name="username" maxlength="80" placeholder="istratova" autocomplete="off"></label>
+        <label class="field"><span>Логин</span><input name="username" maxlength="80" placeholder="abdel.hafez" autocomplete="off"></label>
         <label class="field"><span>Email</span><input name="email" type="email" maxlength="160" value="${esc(teacher.email || '')}" autocomplete="off"></label>
         <div class="row-actions">
           <button class="btn btn-primary" type="submit">${teacher.hasAccess ? 'Сбросить пароль' : 'Выдать доступ'}</button>
@@ -3516,23 +3656,28 @@ function teacherPage() {
         <p class="muted">Логин: <b>${esc(result.username)}</b>${result.mailed ? ' · письмо отправлено' : ''}</p>
       </div>` : ''}
     </section>` : ''}
-    <div class="section-head"><h2>Расписание педагога</h2><span class="muted">${scheduleCount} пар во всём журнале</span></div>
+    <div class="section-head"><h2>Мои пары</h2><span class="muted">${scheduleCount} пар во всём журнале</span></div>
     ${teacherScheduleGrid(data.schedule || [], S.schedule?.weekTypeToday || '')}`;
 }
 
 function teacherSchedulePage() {
   const data = S.teacherSchedule;
   if (!data?.teacher) return missingHtml();
-  const groups = data.groups?.length ? data.groups : (data.scheduleGroups || []);
+  const groups = teacherGroupLinks(data.groups || [], data.scheduleGroups || []);
+  const canMark = can('attendance.mark');
   return `<section class="home-hero">
       <div class="home-hero-copy">
         <div class="kicker">${esc(data.teacher.fullName)}</div>
         <h2>Моё расписание</h2>
-        <p>${esc(weekTypeLabel(data.weekTypeToday))} · ${(data.entries || []).length} пар</p>
+        <p>${esc(weekTypeLabel(data.weekTypeToday))} · ${(data.entries || []).length} пар · ${groups.length} групп</p>
       </div>
     </section>
-    ${groups.length ? `<div class="teacher-group-chips" style="margin-bottom:12px">${groups.map((g) => `
-      <a class="chip on" href="#/calendar/${g.groupId}">${esc(g.name)}${g.pairs ? ` · ${g.pairs}` : ''}</a>`).join('')}</div>` : ''}
+    <section class="card pad" style="margin-bottom:16px">
+      <div class="section-head"><h2>Группы</h2></div>
+      <p class="hint">Откройте группу — там полное расписание и отметки по каждой паре.</p>
+      ${teacherGroupsPanel(groups, { canMark })}
+    </section>
+    <div class="section-head"><h2>Мои пары</h2></div>
     ${teacherScheduleGrid(data.entries || [], data.weekTypeToday)}`;
 }
 
@@ -3827,6 +3972,44 @@ function groupTelegramBindHtml(group) {
   </div>`;
 }
 
+function openPromoteModal(preview) {
+  const items = preview?.items || [];
+  const rows = items.map((item) => {
+    if (item.action === 'promote') {
+      return `<tr>
+        <td>${esc(item.name)}</td>
+        <td>→ <b>${esc(item.nextName)}</b></td>
+        <td class="muted">${item.nextUrl ? 'Excel курса обновлён' : 'URL без изменений'}</td>
+      </tr>`;
+    }
+    if (item.action === 'archive') {
+      return `<tr>
+        <td>${esc(item.name)}</td>
+        <td><b>Архив</b> · ${esc(item.studyYears || 'годы')}</td>
+        <td class="muted">выпускной курс</td>
+      </tr>`;
+    }
+    return `<tr class="is-skip">
+      <td>${esc(item.name)}</td>
+      <td class="muted">пропуск</td>
+      <td class="muted">${esc(item.conflict ? `конфликт: ${item.conflict}` : (item.reason || ''))}</td>
+    </tr>`;
+  }).join('');
+  openModal(modalWrap(`<h2>Летний перевод курса</h2>
+    <p class="muted">Учебный год <b>${esc(preview.academicYearLabel || '')}</b> · макс. курс ${esc(preview.maxCourse)}.
+      Перевод: <b>${preview.promoteCount || 0}</b> · архив: <b>${preview.archiveCount || 0}</b> · пропуск: <b>${preview.skipCount || 0}</b></p>
+    <div class="promote-table-wrap">
+      <table class="promote-table">
+        <thead><tr><th>Сейчас</th><th>Станет</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="3" class="muted">Нет групп</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="row-actions toolbar-row" style="margin-top:14px">
+      <button class="btn btn-primary" type="button" data-act="promote-apply" ${(preview.promoteCount || preview.archiveCount) ? '' : 'disabled'}>Применить перевод</button>
+      <button class="btn btn-ghost" type="button" data-act="close-modal">Отмена</button>
+    </div>`));
+}
+
 function openGroupModal(group, probe = null) {
   const users = (S.users?.users || []).filter((item) => item.active && item.role !== 'admin');
   const elderOptions = [`<option value="">Без старосты</option>`]
@@ -3835,15 +4018,50 @@ function openGroupModal(group, probe = null) {
   const canRename = can('groups.rename') || can('groups.manage');
   const canDelete = can('groups.manage');
   const canElder = can('elders.appoint');
+  const maxCourse = Number((S.settings || S.me?.settings)?.maxCourse) || 4;
+  const course = Number(group?.course) || '';
+  const courseOpts = [`<option value="">—</option>`]
+    .concat(Array.from({ length: maxCourse }, (_, i) => {
+      const n = i + 1;
+      return `<option value="${n}" ${Number(course) === n ? 'selected' : ''}>${n} курс</option>`;
+    }))
+    .join('');
   S._groupModalProbe = probe;
-  openModal(modalWrap(`<h2>${group ? esc(group.name || 'Группа') : 'Новая группа'}</h2>
+  openModal(modalWrap(`<h2>${group ? 'Настройки группы' : 'Новая группа'}</h2>
     <form data-form="save-group" class="group-form">
       <input type="hidden" name="id" value="${group?.id || ''}">
-      <label class="field"><span>Как называется в журнале</span><input name="name" required maxlength="120" value="${esc(group?.name || '')}" placeholder="Группа А-101" ${canRename || !group ? '' : 'readonly'}></label>
+      <div class="kicker">Основное</div>
+      <label class="field"><span>Название в журнале</span><input name="name" required maxlength="120" value="${esc(group?.name || '')}" placeholder="ИК 31/9" ${canRename || !group ? '' : 'readonly'}></label>
+      ${group ? `<div class="settings-grid-2">
+        <label class="field"><span>Текущий курс</span>
+          <select name="course" ${canRename ? '' : 'disabled'}>${courseOpts}</select>
+        </label>
+        <label class="field"><span>Статус</span>
+          <select name="archived" ${canRename ? '' : 'disabled'}>
+            <option value="0" ${group.archived ? '' : 'selected'}>Активная</option>
+            <option value="1" ${group.archived ? 'selected' : ''}>Архив</option>
+          </select>
+        </label>
+      </div>
+      <label class="check-row">
+        <input type="checkbox" name="renameToCourse" value="1" checked ${canRename ? '' : 'disabled'}>
+        <span><strong>Обновить название и код под курс</strong><small>Например 3→4: ИК 31/9 → ИК 41/9</small></span>
+      </label>
+      <div class="kicker">Годы обучения</div>
+      <div class="settings-grid-2">
+        <label class="field"><span>Год начала</span>
+          <input name="studyStartYear" type="number" min="1990" max="2100" value="${esc(group.studyStartYear ?? '')}" placeholder="2019" ${canRename ? '' : 'readonly'}>
+        </label>
+        <label class="field"><span>Год окончания</span>
+          <input name="studyEndYear" type="number" min="1990" max="2100" value="${esc(group.studyEndYear ?? '')}" placeholder="2023" ${canRename ? '' : 'readonly'}>
+        </label>
+      </div>
+      <p class="muted tight">${group.studyYears ? `Сейчас: <b>${esc(group.studyYears)}</b>` : 'При переводе в архив годы подставятся сами, если поля пустые.'}</p>` : ''}
+      <div class="kicker">${excelOn() ? 'Excel' : 'Расписание'}</div>
       ${groupScheduleBindHtml(group, probe)}
       ${groupTelegramBindHtml(group)}
       ${group && canElder ? `<label class="field"><span>Староста</span><select name="elderUserId">${elderOptions}</select></label>` : ''}
-      ${formActions(excelOn() && group ? 'Сохранить привязку' : 'Сохранить', group && canDelete ? `<button class="btn btn-danger" type="button" data-act="delete-group" data-id="${group.id}">Удалить</button>` : '')}
+      ${formActions('Сохранить', group && canDelete ? `<button class="btn btn-danger" type="button" data-act="delete-group" data-id="${group.id}">Удалить</button>` : '')}
     </form>`));
   const form = document.querySelector('#modal-root form[data-form="save-group"]');
   form?.querySelector('[data-code-picker]')?.addEventListener('change', () => syncGroupCodePicker(form));
@@ -4306,9 +4524,11 @@ const actions = {
   async 'sync-teacher-groups'(el) {
     const id = Number(el.dataset.id);
     const detail = S.teacherDetail;
-    const ids = (detail?.scheduleGroups || []).map((g) => g.groupId).filter(Boolean);
+    const assigned = (detail?.groups || []).map((g) => g.groupId).filter(Boolean);
+    const fromSchedule = (detail?.scheduleGroups || []).map((g) => g.groupId).filter(Boolean);
+    const ids = [...new Set([...assigned, ...fromSchedule])];
     return api(`/api/teachers/${id}/groups`, { method: 'PUT', body: { groupIds: ids } })
-      .then(() => { toast('Группы из расписания'); return reload(); });
+      .then(() => { toast('Группы дополнены из расписания'); return reload(); });
   },
   async 'discover-teachers'() {
     const result = await api('/api/teachers', { method: 'POST', body: { discover: true } });
@@ -4344,8 +4564,11 @@ const actions = {
     toast(`Тестовое письмо отправлено${to ? `: ${to}` : ''}`);
   },
   async 'telegram-test'() {
-    await api('/api/settings/telegram-test', { method: 'POST', body: {} });
-    toast('Тестовое сообщение отправлено в чат бота');
+    const result = await api('/api/settings/telegram-test', { method: 'POST', body: {} });
+    const uname = result?.status?.username ? `@${result.status.username}` : '';
+    toast(result?.status?.running
+      ? `Бот онлайн${uname ? ` · ${uname}` : ''} · меню команд обновлено`
+      : 'Тест отправлен');
     if (can('settings.manage')) {
       S.settings = await api('/api/settings');
       if (S.me) S.me.settings = S.settings;
@@ -4354,12 +4577,32 @@ const actions = {
   },
   async 'telegram-restart'() {
     const result = await api('/api/settings/telegram-restart', { method: 'POST', body: {} });
-    toast(result?.result?.ok ? 'Бот перезапущен' : (result?.result?.error || 'Бот не запущен — проверьте токен'));
+    toast(result?.result?.ok
+      ? `Бот перезапущен${result.result.username ? ` · @${result.result.username}` : ''}`
+      : (result?.result?.error || 'Бот не запущен — проверьте токен и включение'));
     if (can('settings.manage')) {
       S.settings = await api('/api/settings');
       if (S.me) S.me.settings = S.settings;
       render();
     }
+  },
+  'groups-tab'(el) {
+    S.groupsTab = el?.dataset.tab === 'archive' ? 'archive' : 'active';
+    render();
+  },
+  async 'promote-preview'() {
+    const preview = await api('/api/groups/promote/preview');
+    S._promotePreview = preview;
+    openPromoteModal(preview);
+  },
+  async 'promote-apply'() {
+    const result = await api('/api/groups/promote', { method: 'POST', body: {} });
+    const moved = result.applied?.filter((a) => a.action === 'promote').length || 0;
+    const archived = result.applied?.filter((a) => a.action === 'archive').length || 0;
+    toast(`Готово: переведено ${moved}, в архив ${archived}`);
+    closeModal();
+    S.overview = null;
+    await reload();
   },
   async 'preview-schedule'(el) {
     const groupId = Number(el?.dataset.group || S.route?.groupId || 0) || undefined;
@@ -4819,33 +5062,31 @@ const actions = {
     else render();
   },
   'pair-fill-clear'(el) {
-    S.pairCopyConfirm = null;
-    S.pairConfirm = {
-      groupId: Number(el.dataset.group),
+    const day = S.calendarDay;
+    const pair = day?.pairs?.find((item) => item.scheduleEntryId === Number(el.dataset.entry));
+    askClearPairList(pair, day, {
+      groupId: el.dataset.group,
       date: el.dataset.date,
-      scheduleEntryId: Number(el.dataset.entry),
-      fill: 'clear',
-    };
+      scheduleEntryId: el.dataset.entry,
+    });
+  },
+  'pair-fill-cancel'() {
+    S.pairConfirm = null;
+    closeConfirmDialog();
     if (S.pairModalOpen && document.querySelector('.pair-modal')) {
       const host = document.getElementById('pair-confirm-host');
       if (host) host.innerHTML = pairConfirmBarHtml();
       return;
     }
-    render();
-    document.getElementById('day-copy-host')?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+    if (!document.querySelector('.pair-modal')) render();
   },
-  'pair-fill-cancel'() {
-    S.pairConfirm = null;
-    if (S.pairModalOpen && document.querySelector('.pair-modal')) {
-      const host = document.getElementById('pair-confirm-host');
-      if (host) host.innerHTML = pairCopyConfirmBarHtml();
-      return;
-    }
-    render();
+  'close-confirm'() {
+    closeConfirmDialog();
   },
   async 'confirm-pair-fill'() {
     const payload = S.pairConfirm || S._pairFill;
     if (!payload) return;
+    closeConfirmDialog();
     const q = document.getElementById('q');
     if (q) S.q = q.value;
     const list = document.querySelector('.pair-modal-people');
@@ -4909,7 +5150,7 @@ const actions = {
       toSubject: toPair.subjectName || '',
     };
 
-    // Повторный клик по той же связке / одинаковый список → очистить цель.
+    // Повторный клик по той же связке / одинаковый список → подтвердить очистку цели.
     const sameList = pairMarksEqual(fromPair, toPair);
     const sameLink = S.lastPairCopy
       && Number(S.lastPairCopy.fromScheduleEntryId) === fromId
@@ -4917,70 +5158,30 @@ const actions = {
       && Number(S.lastPairCopy.groupId) === payload.groupId
       && S.lastPairCopy.date === payload.date;
     if ((sameList || sameLink) && pairHasMarks(toPair)) {
-      const undoPayload = { ...payload };
-      const data = await api('/api/calendar/pair-attendance', {
-        method: 'PUT',
-        body: {
-          groupId: payload.groupId,
-          date: payload.date,
-          scheduleEntryId: toId,
-          fill: 'clear',
-        },
-      });
-      S.calendarDay = data.day;
-      S.pairCopyConfirm = null;
-      S.lastPairCopy = null;
-      const keepModal = S.pairModalOpen;
-      const activeId = S.activePairId;
-      const list = document.querySelector('.pair-modal-people');
-      const scrollTop = list?.scrollTop || 0;
-      if (keepModal && document.querySelector('.pair-modal')) {
-        const shown = data.day.pairs.find((item) => item.scheduleEntryId === Number(activeId));
-        if (shown) {
-          recomputePairStats(shown, data.day);
-          refreshPairPeopleList(shown, data.day, { scrollTop });
-        }
-      } else {
-        render();
-      }
-      toast(`Список ${payload.toPairNum}-й очищен`, {
-        actionLabel: 'Вернуть',
-        action: () => {
-          S.pairCopyConfirm = undoPayload;
-          return actions['confirm-pair-copy']({ dataset: { mode: 'replace' } });
-        },
-        timeout: 6000,
+      askClearPairList(toPair, day, {
+        groupId: payload.groupId,
+        date: payload.date,
+        scheduleEntryId: toId,
       });
       return;
     }
 
-    // Пустую целевую пару заполняем сразу без лишнего шага.
-    if (!pairHasMarks(toPair)) {
-      S.pairCopyConfirm = payload;
-      return actions['confirm-pair-copy']({ dataset: { mode: 'replace' } });
-    }
-    S.pairCopyConfirm = payload;
-    if (S.pairModalOpen && document.querySelector('.pair-modal')) {
-      const host = document.getElementById('pair-confirm-host');
-      if (host) host.innerHTML = pairConfirmBarHtml() + pairCopyConfirmBarHtml();
-      return;
-    }
-    render();
-    const host = document.getElementById('day-copy-host') || document.querySelector('.day-page');
-    host?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+    askCopyPairAttendance(payload);
   },
   'pair-copy-cancel'() {
     S.pairCopyConfirm = null;
+    closeConfirmDialog();
     if (S.pairModalOpen && document.querySelector('.pair-modal')) {
       const host = document.getElementById('pair-confirm-host');
       if (host) host.innerHTML = pairConfirmBarHtml();
       return;
     }
-    render();
+    if (!document.querySelector('.pair-modal')) render();
   },
   async 'confirm-pair-copy'(el) {
     const payload = S.pairCopyConfirm;
     if (!payload) return;
+    closeConfirmDialog();
     const mode = ['fill-empty', 'here-only', 'away-only'].includes(el?.dataset?.mode)
       ? el.dataset.mode
       : 'replace';
@@ -5255,10 +5456,26 @@ const actions = {
   },
   async 'confirm-delete-subject'(el) {
     const id = Number(el.dataset.id);
-    const groupId = S.journal?.subject?.id === id ? S.journal.subject.groupId : S.overview?.subjects.find((item) => item.id === id)?.groupId;
+    const subject = S.journal?.subject?.id === id
+      ? S.journal.subject
+      : S.overview?.subjects.find((item) => item.id === id);
+    const key = normalizeSubjectKey(subject?.name || '');
+    const siblings = (S.journal?.subject?.id === id
+      ? (S.journal.siblings || [])
+      : (S.overview?.subjects || [])
+    ).filter((row) => row.id !== id && normalizeSubjectKey(row.name) === key);
     await api(`/api/subjects/${id}`, { method: 'DELETE' });
     toast('Предмет удалён');
-    await go(groupId ? `#/group/${groupId}` : '#/subjects');
+    if (siblings.length > 1) {
+      await go(`#/subjects/hub/${encodeURIComponent(key)}`);
+      return;
+    }
+    if (siblings.length === 1) {
+      await go(`#/subject/${siblings[0].id}/attendance`);
+      return;
+    }
+    const stayInCatalog = S.route?.name === 'subject-hub' || S.route?.name === 'subjects';
+    await go(stayInCatalog ? '#/subjects' : (subject?.groupId ? `#/group/${subject.groupId}` : '#/subjects'));
   },
   'add-lesson'() { openLessonModal(); },
   'edit-lesson'(el) {
@@ -5449,6 +5666,12 @@ async function onSubmit(event) {
       const smtpSecure = !!form.querySelector('input[name="smtpSecure"]')?.checked;
       const telegramEnabled = !!form.querySelector('input[name="telegramEnabled"]')?.checked;
       const telegramMultiMode = !!form.querySelector('input[name="telegramMultiMode"]')?.checked;
+      const promotionKeepOldAlias = !!form.querySelector('input[name="promotionKeepOldAlias"]')?.checked;
+      const promotionCourseUrls = {};
+      for (const course of [1, 2, 3, 4]) {
+        const url = String(data[`courseUrl${course}`] || '').trim();
+        if (url) promotionCourseUrls[String(course)] = url;
+      }
       const body = {
         institutionName: data.institutionName,
         institutionSubtitle: data.institutionSubtitle,
@@ -5473,6 +5696,10 @@ async function onSubmit(event) {
         telegramAdminIds: data.telegramAdminIds || '',
         telegramMultiMode,
         telegramBindings: telegramMultiMode ? readTelegramBindingsFromForm(form) : (S.settings?.telegramBindings || []),
+        academicYearStart: Number(data.academicYearStart) || new Date().getFullYear(),
+        maxCourse: Number(data.maxCourse) || 4,
+        promotionKeepOldAlias,
+        promotionCourseUrls,
       };
       if (data.smtpPass) body.smtpPass = data.smtpPass;
       if (data.telegramBotToken) body.telegramBotToken = data.telegramBotToken;
@@ -5587,6 +5814,17 @@ async function onSubmit(event) {
         if (Object.prototype.hasOwnProperty.call(data, 'elderUserId')) {
           body.elderUserId = data.elderUserId === '' ? null : Number(data.elderUserId);
         }
+        if (form.querySelector('select[name="archived"]')) {
+          body.archived = data.archived === '1' || data.archived === 1;
+        }
+        if (form.querySelector('input[name="studyStartYear"]')) {
+          body.studyStartYear = data.studyStartYear === '' ? null : Number(data.studyStartYear);
+          body.studyEndYear = data.studyEndYear === '' ? null : Number(data.studyEndYear);
+        }
+        if (form.querySelector('select[name="course"]') && data.course !== '') {
+          body.course = Number(data.course);
+          body.renameToCourse = !!form.querySelector('input[name="renameToCourse"]')?.checked;
+        }
         await api(`/api/groups/${data.id}`, { method: 'PATCH', body });
         if (can('settings.manage') && form.querySelector('input[name="telegramChatId"]')) {
           const chatId = String(data.telegramChatId || '').trim();
@@ -5666,9 +5904,34 @@ async function onSubmit(event) {
       else await api('/api/students', { method: 'POST', body });
       toast(data.id ? 'Ученик сохранён' : 'Ученик добавлен');
     } else if (form.dataset.form === 'save-subject') {
-      if (data.id) await api(`/api/subjects/${data.id}`, { method: 'PATCH', body: { name: data.name } });
-      else await api('/api/subjects', { method: 'POST', body: { name: data.name, groupId: Number(data.groupId) } });
-      toast(data.id ? 'Предмет сохранён' : 'Предмет добавлен');
+      if (data.id) {
+        await api(`/api/subjects/${data.id}`, { method: 'PATCH', body: { name: data.name } });
+        toast('Предмет сохранён');
+      } else {
+        const groupIds = [...form.querySelectorAll('input[name="groupIds"]:checked')].map((el) => Number(el.value));
+        if (!groupIds.length) {
+          toast('Выберите хотя бы одну группу');
+          form.dataset.busy = '';
+          if (submit) { submit.disabled = false; }
+          return;
+        }
+        const result = await api('/api/subjects', {
+          method: 'POST',
+          body: { name: data.name, groupIds },
+        });
+        const created = result.created || groupIds.length;
+        const skipped = result.skipped || 0;
+        toast(skipped
+          ? `Добавлено в ${created} · уже было: ${skipped}`
+          : (created > 1 ? `Предмет добавлен в ${created} групп` : 'Предмет добавлен'));
+        closeModal();
+        if (created > 1 && result.name) {
+          await go(`#/subjects/hub/${encodeURIComponent(normalizeSubjectKey(result.name))}`);
+          return;
+        }
+        await reload();
+        return;
+      }
     } else if (form.dataset.form === 'save-lesson') {
       const body = { date: data.date, topic: data.topic };
       if (data.id) await api(`/api/lessons/${data.id}`, { method: 'PATCH', body });
